@@ -1,0 +1,13 @@
+name: Add issues to Greenhouse Delivery
+on:
+  issues:
+    types: [opened, transferred]
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/users/thedrewdz/projects/1
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}

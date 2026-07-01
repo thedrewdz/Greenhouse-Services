@@ -1,0 +1,14 @@
+<Solution>
+  <Project Path="Greenhouse.Api.Tests/Greenhouse.Api.Tests.csproj" />
+  <Project Path="Greenhouse.Api/Greenhouse.Api.csproj" />
+  <Project Path="Greenhouse.Bluetooth.Tests/Greenhouse.Bluetooth.Tests.csproj" />
+  <Project Path="Greenhouse.Bluetooth/Greenhouse.Bluetooth.csproj" />
+  <Project Path="Greenhouse.Core.Tests/Greenhouse.Core.Tests.csproj" />
+  <Project Path="Greenhouse.Core/Greenhouse.Core.csproj" />
+  <Project Path="Greenhouse.Mqtt.Tests/Greenhouse.Mqtt.Tests.csproj" />
+  <Project Path="Greenhouse.Mqtt/Greenhouse.Mqtt.csproj" />
+  <Project Path="Greenhouse.Runtime.Tests/Greenhouse.Runtime.Tests.csproj" />
+  <Project Path="Greenhouse.Runtime/Greenhouse.Runtime.csproj" />
+  <Project Path="Greenhouse.Storage.Tests/Greenhouse.Storage.Tests.csproj" />
+  <Project Path="Greenhouse.Storage/Greenhouse.Storage.csproj" />
+</Solution>

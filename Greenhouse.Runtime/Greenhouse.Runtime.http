@@ -1,6 +1,11 @@
-@Greenhouse.Runtime_HostAddress = http://localhost:5150
+@Greenhouse.Runtime_HostAddress = http://127.0.0.1:5150
 
-GET {{Greenhouse.Runtime_HostAddress}}/weatherforecast/
+GET {{Greenhouse.Runtime_HostAddress}}/api/setup/status
+Accept: application/json
+
+###
+
+GET {{Greenhouse.Runtime_HostAddress}}/api/setup/main-config
 Accept: application/json
 
 ###

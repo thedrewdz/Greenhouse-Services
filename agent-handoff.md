@@ -13,16 +13,38 @@ Durable policy, canonical context, architecture, MQTT contracts, ADRs, and skill
 
 ## Current Progress Snapshot
 
-- Agent setup created. The .NET solution and projects have not been generated.
+- Solution scaffolded (12 projects) + new `Greenhouse.Network` project added.
+- Epic #7 (Main Unit Setup — Services) implemented through the code layers:
+  - #8 EF Core entities (`MainConfigEntity`, `WifiCredentialsEntity`, internal to Storage),
+    `GreenhouseDbContext`, design-time factory, `InitialCreate` migration. EF Core 8.0.28.
+  - #9 `IMainConfigRepository` / `IWifiCredentialsRepository` (Core.Configuration) + EF
+    implementations (Storage.Repositories); `WifiCredentials` upsert stamps `SavedAt`.
+  - #10 `INetworkConnector` port + `ConnectResult` + `NetworkConnectorUnavailableException`
+    (Core.Networking); `NmcliNetworkAdapter` (new `Greenhouse.Network`) over an
+    `INmcliCommandRunner` seam; `AddGreenhouseNetwork()` extension.
+  - #11 use cases (Core.Setup): WriteMainConfig, ReadMainConfig, ConnectToNetwork,
+    GetWifiCredentials, ReadSetupStatus; `MainConfigValidation` shared with the API.
+  - #12/#13/#14 controllers (Api): MainConfig (GET/POST + PUT/DELETE 501), WifiConfig
+    (GET/POST), Setup (GET status) + DTOs and the `validation-error` envelope.
+- Tests green: Api 20, Core 16, Network 11, Storage 8. Full solution builds clean.
+- Chose bare-minimum logging (Pi storage, no cloud sink): adapter logs only on
+  failure/timeout, never the password.
 
 ## Open Questions
 
-- None recorded.
+- Adapter naming reconciliation pending in canonical docs: implemented as
+  `NmcliNetworkAdapter`; spec/#22 say `NetworkManagerAdapter`, #10 said
+  `NmcliNetworkConnectorAdapter`. Doc-update pass needed.
 
 ## Next Actions
 
-- Per ADR 0002's validation spike, a stub services daemon is needed: one REST endpoint plus one WebSocket/SSE message on loopback, used to validate the Flutter/flutter-pi UI on the Raspberry Pi 4.
-- Establish the solution structure (headless ASP.NET Core host, core/domain, MQTT, storage, contracts) following `docs/skills/dotnet-headless-service-host.md` and the canonical architecture docs.
+- #37 (new sub-issue of #7): wire the Setup services into `Program.cs` + run EF migrations at
+  startup; add `Greenhouse.Runtime` -> `Greenhouse.Network` reference; add
+  `ConnectionStrings:Default` to appsettings. This is the only remaining #7 item and is
+  hardware/host-dependent for full verification.
+- Storage skill (`dotnet-storage-and-persistence.md`) says "WiFi credentials are not stored
+  in the app database" — contradicts the ready-for-dev spec (WifiCredentials table). Flag for
+  a documentation-repo update.
 
 ## Resume Prompt
 

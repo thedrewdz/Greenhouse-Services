@@ -7,6 +7,8 @@
   <Project Path="Greenhouse.Core/Greenhouse.Core.csproj" />
   <Project Path="Greenhouse.Mqtt.Tests/Greenhouse.Mqtt.Tests.csproj" />
   <Project Path="Greenhouse.Mqtt/Greenhouse.Mqtt.csproj" />
+  <Project Path="Greenhouse.Network.Tests/Greenhouse.Network.Tests.csproj" />
+  <Project Path="Greenhouse.Network/Greenhouse.Network.csproj" />
   <Project Path="Greenhouse.Runtime.Tests/Greenhouse.Runtime.Tests.csproj" />
   <Project Path="Greenhouse.Runtime/Greenhouse.Runtime.csproj" />
   <Project Path="Greenhouse.Storage.Tests/Greenhouse.Storage.Tests.csproj" />

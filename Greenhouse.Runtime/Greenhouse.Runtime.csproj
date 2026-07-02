@@ -15,6 +15,7 @@
     <ProjectReference Include="..\Greenhouse.Api\Greenhouse.Api.csproj" />
     <ProjectReference Include="..\Greenhouse.Mqtt\Greenhouse.Mqtt.csproj" />
     <ProjectReference Include="..\Greenhouse.Bluetooth\Greenhouse.Bluetooth.csproj" />
+    <ProjectReference Include="..\Greenhouse.Network\Greenhouse.Network.csproj" />
     <ProjectReference Include="..\Greenhouse.Storage\Greenhouse.Storage.csproj" />
   </ItemGroup>
 

@@ -1,44 +1,56 @@
+using Greenhouse.Core.Configuration;
+using Greenhouse.Core.Setup;
+using Greenhouse.Network;
+using Greenhouse.Storage;
+using Greenhouse.Storage.Repositories;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+// Loopback-only binding — the UI runs on the same device; never expose an external interface.
+// Port matches the http profile in Properties/launchSettings.json; do not bind 0.0.0.0.
+builder.WebHost.UseUrls("http://127.0.0.1:5150");
+
+builder.Services.AddControllers();
+
+// OpenAPI — the daemon publishes the contract the WebUI client is generated from
+// (AGENTS.md non-negotiable). Keep it accurate and versioned with behavior changes.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// EF Core (SQLite) — connection string from configuration, never hardcoded.
+builder.Services.AddDbContext<GreenhouseDbContext>(o =>
+    o.UseSqlite(builder.Configuration.GetConnectionString("Default")));
+
+// Repositories (scoped — share the request DbContext)
+builder.Services.AddScoped<IMainConfigRepository, MainConfigRepository>();
+builder.Services.AddScoped<IWifiCredentialsRepository, WifiCredentialsRepository>();
+
+// OS network connector (registers INetworkConnector -> NmcliNetworkAdapter)
+builder.Services.AddGreenhouseNetwork();
+
+// Clock (used by WriteMainConfig)
+builder.Services.AddSingleton(TimeProvider.System);
+
+// Use cases (transient)
+builder.Services.AddTransient<WriteMainConfig>();
+builder.Services.AddTransient<ReadMainConfig>();
+builder.Services.AddTransient<ConnectToNetwork>();
+builder.Services.AddTransient<GetWifiCredentials>();
+builder.Services.AddTransient<ReadSetupStatus>();
+
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+// Migrate before serving traffic so the schema exists on a clean host first start.
+using (var scope = app.Services.CreateScope())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    await scope.ServiceProvider.GetRequiredService<GreenhouseDbContext>()
+        .Database.MigrateAsync();
 }
 
-app.UseHttpsRedirection();
+// Publish OpenAPI. No app.UseHttpsRedirection() — loopback stays plain HTTP (AGENTS.md).
+app.UseSwagger();
+app.UseSwaggerUI();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast")
-.WithOpenApi();
-
+app.MapControllers();
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

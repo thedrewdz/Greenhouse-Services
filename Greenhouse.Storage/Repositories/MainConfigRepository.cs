@@ -20,7 +20,7 @@ public sealed class MainConfigRepository : IMainConfigRepository
 
     public async Task<MainConfig?> GetAsync()
     {
-        var entity = await _context.MainConfigs.AsNoTracking().FirstOrDefaultAsync();
+        var entity = await _context.MainConfigs.AsNoTracking().OrderBy(e => e.Id).FirstOrDefaultAsync();
         return entity is null ? null : MapToModel(entity);
     }
 

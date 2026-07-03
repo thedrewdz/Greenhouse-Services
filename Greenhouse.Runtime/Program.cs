@@ -5,6 +5,7 @@ using Greenhouse.Mqtt;
 using Greenhouse.Network;
 using Greenhouse.Storage;
 using Greenhouse.Storage.Repositories;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,9 +21,13 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// EF Core (SQLite) — connection string from configuration, never hardcoded.
-builder.Services.AddDbContext<GreenhouseDbContext>(o =>
-    o.UseSqlite(builder.Configuration.GetConnectionString("Default")));
+// EF Core (SQLite) — a single persistent connection is kept open for the process lifetime.
+// This ensures EF Core's migration executor sees schema changes (e.g. __EFMigrationsHistory)
+// across all commands without relying on SQLite's schema cache being refreshed between
+// connection pool checkouts, which is unreliable on Linux ARM64 with WAL mode.
+var sqliteConnection = new SqliteConnection(builder.Configuration.GetConnectionString("Default"));
+sqliteConnection.Open();
+builder.Services.AddDbContext<GreenhouseDbContext>(o => o.UseSqlite(sqliteConnection));
 
 // Repositories (scoped — share the request DbContext)
 builder.Services.AddScoped<IMainConfigRepository, MainConfigRepository>();

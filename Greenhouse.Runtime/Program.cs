@@ -1,5 +1,7 @@
+using Greenhouse.Bluetooth;
 using Greenhouse.Core.Configuration;
 using Greenhouse.Core.Setup;
+using Greenhouse.Mqtt;
 using Greenhouse.Network;
 using Greenhouse.Storage;
 using Greenhouse.Storage.Repositories;
@@ -28,6 +30,17 @@ builder.Services.AddScoped<IWifiCredentialsRepository, WifiCredentialsRepository
 
 // OS network connector (registers INetworkConnector -> NmcliNetworkAdapter)
 builder.Services.AddGreenhouseNetwork();
+
+// MQTT messaging — the same singleton is IMessagingService and the IHostedService that connects
+// at startup and reconnects on disconnect. Broker settings come from the "Mqtt" configuration
+// section, never hardcoded.
+builder.Services.Configure<MqttOptions>(builder.Configuration.GetSection(MqttOptions.SectionName));
+builder.Services.AddGreenhouseMqtt();
+
+// BLE onboarding — registers the internal IBleTransport and the IEdgeUnitProvisioningTransport
+// port. No BLE scan starts at process startup; scanning begins only when an onboarding use case
+// calls the port.
+builder.Services.AddGreenhouseBluetooth();
 
 // Clock (used by WriteMainConfig)
 builder.Services.AddSingleton(TimeProvider.System);

@@ -17,6 +17,22 @@ public class BleEdgeUnitProvisioningAdapterTests
     private static ProvisioningPayload SamplePayload(string password = "secret") =>
         new("1ADD5912AF61", "MyWifi", password, "mqtt://192.168.1.50", 30000);
 
+    private static ProvisionableUnit SampleUnit(string transportAddress = "AA:BB:CC:DD:EE:FF") =>
+        new("1ADD5912AF61", transportAddress, "GH-Edge-1ADD5912AF61", -40);
+
+    private static async Task<IReadOnlyList<ProvisionableUnit>> ScanAsync(
+        BleEdgeUnitProvisioningAdapter adapter,
+        TimeSpan timeout)
+    {
+        var units = new List<ProvisionableUnit>();
+        await foreach (var unit in adapter.ScanForProvisionableUnitsAsync(timeout))
+        {
+            units.Add(unit);
+        }
+
+        return units;
+    }
+
     [Fact]
     public async Task Scan_maps_ble_devices_to_provisionable_units()
     {
@@ -28,12 +44,40 @@ public class BleEdgeUnitProvisioningAdapterTests
             },
         };
 
-        var units = await Create(transport).ScanForProvisionableUnitsAsync(TimeSpan.FromSeconds(5));
+        var units = await ScanAsync(Create(transport), TimeSpan.FromSeconds(5));
 
         var unit = Assert.Single(units);
-        Assert.Equal("AA:BB:CC:DD:EE:FF", unit.DeviceId);
+        // The device id is the hardware identity from the advertised name, not the BLE address:
+        // it is what the API, the hub, and every later heartbeat use.
+        Assert.Equal("1ADD5912AF61", unit.DeviceId);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", unit.TransportAddress);
         Assert.Equal("GH-Edge-1ADD5912AF61", unit.AdvertisedName);
+        Assert.Equal(-40, unit.Rssi);
         Assert.Equal("GH-Edge-", transport.LastScanFilter!.NamePrefix);
+        Assert.Equal(TimeSpan.FromSeconds(5), transport.LastScanDuration);
+    }
+
+    [Fact]
+    public async Task Scan_falls_back_to_the_transport_address_for_an_unexpected_name()
+    {
+        var transport = new FakeBleTransport
+        {
+            ScanResult = new[] { new BleDeviceInfo("AA:BB:CC:DD:EE:FF", "SomethingElse", -55) },
+        };
+
+        var units = await ScanAsync(Create(transport), TimeSpan.FromSeconds(5));
+
+        Assert.Equal("AA:BB:CC:DD:EE:FF", Assert.Single(units).DeviceId);
+    }
+
+    [Fact]
+    public async Task Provision_targets_the_transport_address()
+    {
+        var transport = new FakeBleTransport();
+
+        await Create(transport).ProvisionUnitAsync(SampleUnit("11:22:33:44:55:66"), SamplePayload());
+
+        Assert.Equal("11:22:33:44:55:66", transport.LastConnectedAddress);
     }
 
     [Fact]
@@ -41,7 +85,7 @@ public class BleEdgeUnitProvisioningAdapterTests
     {
         var transport = new FakeBleTransport();
 
-        await Create(transport).ProvisionUnitAsync("AA:BB:CC:DD:EE:FF", SamplePayload());
+        await Create(transport).ProvisionUnitAsync(SampleUnit(), SamplePayload());
 
         Assert.NotNull(transport.WrittenPayload);
         using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(transport.WrittenPayload!));
@@ -60,7 +104,7 @@ public class BleEdgeUnitProvisioningAdapterTests
         var transport = new FakeBleTransport();
         var payload = new ProvisioningPayload("1ADD5912AF61", "MyWifi", "secret", "mqtt://192.168.1.50");
 
-        await Create(transport).ProvisionUnitAsync("dev", payload);
+        await Create(transport).ProvisionUnitAsync(SampleUnit(), payload);
 
         using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(transport.WrittenPayload!));
         Assert.False(doc.RootElement.TryGetProperty("heartbeat_interval_ms", out _));
@@ -74,7 +118,7 @@ public class BleEdgeUnitProvisioningAdapterTests
             StatusResponse = Encoding.UTF8.GetBytes("{\"result\":\"success\",\"error_code\":0,\"error_message\":\"\"}"),
         };
 
-        var result = await Create(transport).ProvisionUnitAsync("dev", SamplePayload());
+        var result = await Create(transport).ProvisionUnitAsync(SampleUnit(), SamplePayload());
 
         Assert.IsType<ProvisioningResult.Success>(result);
     }
@@ -88,7 +132,7 @@ public class BleEdgeUnitProvisioningAdapterTests
                 "{\"result\":\"error\",\"error_code\":2004,\"error_message\":\"mqtt_broker_uri_invalid\"}"),
         };
 
-        var result = await Create(transport).ProvisionUnitAsync("dev", SamplePayload());
+        var result = await Create(transport).ProvisionUnitAsync(SampleUnit(), SamplePayload());
 
         var failed = Assert.IsType<ProvisioningResult.Failed>(result);
         Assert.Equal(2004, failed.ErrorCode);
@@ -101,7 +145,7 @@ public class BleEdgeUnitProvisioningAdapterTests
         var transport = new FakeBleTransport { ThrowOnWrite = true };
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => Create(transport).ProvisionUnitAsync("dev", SamplePayload()));
+            () => Create(transport).ProvisionUnitAsync(SampleUnit(), SamplePayload()));
 
         Assert.Equal(1, transport.DisconnectCount);
     }
@@ -114,7 +158,7 @@ public class BleEdgeUnitProvisioningAdapterTests
         var logger = new CapturingLogger<BleEdgeUnitProvisioningAdapter>();
 
         await new BleEdgeUnitProvisioningAdapter(transport, logger)
-            .ProvisionUnitAsync("dev", SamplePayload(password));
+            .ProvisionUnitAsync(SampleUnit(), SamplePayload(password));
 
         Assert.All(logger.Messages, message => Assert.DoesNotContain(password, message));
     }

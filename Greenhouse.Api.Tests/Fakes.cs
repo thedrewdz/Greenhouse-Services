@@ -64,8 +64,13 @@ internal sealed class FakeNetworkConnector : INetworkConnector
         return Task.FromResult(Online);
     }
 
+    public string? LocalAddress { get; set; }
+
     public Task<string?> GetCurrentNetworkNameAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(CurrentNetworkName);
+
+    public Task<string?> GetLocalAddressAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(LocalAddress);
 
     public Task<ConnectResult> ConnectAsync(
         string networkName,

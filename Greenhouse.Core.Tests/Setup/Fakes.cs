@@ -58,6 +58,7 @@ internal sealed class FakeNetworkConnector : INetworkConnector
 {
     public bool Online { get; set; }
     public ConnectResult ConnectResult { get; set; } = new ConnectResult.Connected();
+    public string? LocalAddress { get; set; }
     public string? LastNetworkName { get; private set; }
     public string? LastPassword { get; private set; }
 
@@ -65,6 +66,9 @@ internal sealed class FakeNetworkConnector : INetworkConnector
 
     public Task<string?> GetCurrentNetworkNameAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<string?>(Online ? "MyNetwork" : null);
+
+    public Task<string?> GetLocalAddressAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(LocalAddress);
 
     public Task<ConnectResult> ConnectAsync(
         string networkName,

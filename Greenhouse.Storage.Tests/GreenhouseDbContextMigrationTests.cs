@@ -53,6 +53,37 @@ public class GreenhouseDbContextMigrationTests
     }
 
     [Fact]
+    public void Migration_creates_the_edge_unit_registration_tables()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        using var context = CreateContext(connection);
+
+        context.Database.Migrate();
+
+        var tables = GetTableNames(connection);
+        Assert.Contains("EdgeUnits", tables);
+        Assert.Contains("SlotTopologies", tables);
+        Assert.Contains("OnboardingSessions", tables);
+    }
+
+    [Fact]
+    public void EdgeUnit_DeviceId_is_uniquely_indexed()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        using var context = CreateContext(connection);
+        context.Database.Migrate();
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'EdgeUnits' " +
+            "AND sql LIKE '%UNIQUE%' AND sql LIKE '%DeviceId%';";
+
+        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+    }
+
+    [Fact]
     public void Migration_is_reversible()
     {
         using var connection = new SqliteConnection("DataSource=:memory:");
@@ -67,5 +98,8 @@ public class GreenhouseDbContextMigrationTests
         var tables = GetTableNames(connection);
         Assert.DoesNotContain("MainConfigs", tables);
         Assert.DoesNotContain("WifiCredentials", tables);
+        Assert.DoesNotContain("EdgeUnits", tables);
+        Assert.DoesNotContain("SlotTopologies", tables);
+        Assert.DoesNotContain("OnboardingSessions", tables);
     }
 }

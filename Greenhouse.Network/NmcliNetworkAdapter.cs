@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using Greenhouse.Core.Networking;
 using Microsoft.Extensions.Logging;
 
@@ -56,6 +58,70 @@ public sealed class NmcliNetworkAdapter : INetworkConnector
         }
 
         return null;
+    }
+
+    public async Task<string?> GetLocalAddressAsync(CancellationToken cancellationToken = default)
+    {
+        // Terse output is one "IP4.ADDRESS[n]:<addr>/<prefix>" line per configured address,
+        // grouped per device. Devices with no IPv4 lease simply contribute no lines.
+        var result = await _runner.RunAsync(
+            new[] { "-t", "-f", "IP4.ADDRESS", "device", "show" },
+            cancellationToken);
+
+        using var reader = new StringReader(result.StandardOutput);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var separator = line.IndexOf(':');
+            if (separator < 0)
+            {
+                continue;
+            }
+
+            var value = line[(separator + 1)..].Trim();
+
+            // Strip the CIDR suffix; nmcli reports "192.168.1.50/24".
+            var slash = value.IndexOf('/');
+            if (slash >= 0)
+            {
+                value = value[..slash];
+            }
+
+            if (IsRoutableIpv4(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Accepts only dotted-quad IPv4 addresses an Edge Unit could actually reach the broker on:
+    /// loopback, link-local, and the unspecified address are rejected.
+    /// </summary>
+    /// <remarks>
+    /// Parsed with <see cref="IPAddress.TryParse"/> rather than by splitting on '.': that also
+    /// rejects the near-misses a hand-rolled check lets through, such as embedded whitespace or a
+    /// signed octet, either of which would be handed to an Edge Unit as a broker host.
+    /// </remarks>
+    private static bool IsRoutableIpv4(string value)
+    {
+        if (!IPAddress.TryParse(value, out var address)
+            || address.AddressFamily != AddressFamily.InterNetwork
+            // TryParse accepts shorthand forms like "10.1" that nmcli never emits; require the
+            // dotted quad so the value round-trips to exactly what was reported.
+            || address.ToString() != value)
+        {
+            return false;
+        }
+
+        var octets = address.GetAddressBytes();
+
+        return !IPAddress.IsLoopback(address)
+               && !address.Equals(IPAddress.Any)
+               // Link-local: 169.254.0.0/16.
+               && !(octets[0] == 169 && octets[1] == 254);
     }
 
     public async Task<ConnectResult> ConnectAsync(

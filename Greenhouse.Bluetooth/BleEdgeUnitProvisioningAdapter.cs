@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -39,43 +40,58 @@ internal sealed class BleEdgeUnitProvisioningAdapter : IEdgeUnitProvisioningTran
         _logger = logger;
     }
 
-    public async Task<IReadOnlyList<ProvisionableUnit>> ScanForProvisionableUnitsAsync(
+    public async IAsyncEnumerable<ProvisionableUnit> ScanForProvisionableUnitsAsync(
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         // Scanning begins only here — never at process startup. The transport bounds the scan
         // window; the caller's token still cancels it.
         var filter = new BleScanFilter(NamePrefix: AdvertisingNamePrefix, ServiceUuid: OnboardingServiceUuid);
-        var devices = await _transport.ScanAsync(filter, cancellationToken);
 
-        return devices
-            .Select(device => new ProvisionableUnit(device.DeviceId, device.Name))
-            .ToArray();
+        await foreach (var device in _transport.ScanAsync(filter, timeout, cancellationToken))
+        {
+            yield return new ProvisionableUnit(
+                DeriveDeviceId(device),
+                device.DeviceId,
+                device.Name,
+                device.Rssi);
+        }
     }
 
+    /// <summary>
+    /// Extracts the Edge Unit hardware identity from its advertised name. The
+    /// <c>GH-Edge-{device_id}</c> convention is owned here, so nothing above this adapter has to
+    /// know it. Falls back to the transport address if a unit advertises an unexpected name.
+    /// </summary>
+    private static string DeriveDeviceId(BleDeviceInfo device) =>
+        device.Name.StartsWith(AdvertisingNamePrefix, StringComparison.OrdinalIgnoreCase)
+            ? device.Name[AdvertisingNamePrefix.Length..]
+            : device.DeviceId;
+
     public async Task<ProvisioningResult> ProvisionUnitAsync(
-        string deviceId,
+        ProvisionableUnit unit,
         ProvisioningPayload payload,
         CancellationToken cancellationToken = default)
     {
         // Never log the payload or its WiFi password — only the non-sensitive device identity.
-        _logger.LogInformation("Provisioning Edge Unit '{DeviceId}'.", deviceId);
+        _logger.LogInformation("Provisioning Edge Unit '{DeviceId}'.", unit.DeviceId);
 
         var json = SerializePayload(payload);
         var payloadBytes = Encoding.UTF8.GetBytes(json);
+        var address = unit.TransportAddress;
 
-        await _transport.ConnectAsync(deviceId, cancellationToken);
+        await _transport.ConnectAsync(address, cancellationToken);
         try
         {
             await _transport.WriteCharacteristicAsync(
-                deviceId,
+                address,
                 OnboardingServiceUuid,
                 ProvisioningPayloadCharacteristicUuid,
                 payloadBytes,
                 cancellationToken);
 
             var statusBytes = await _transport.ReadCharacteristicAsync(
-                deviceId,
+                address,
                 OnboardingServiceUuid,
                 ProvisioningStatusCharacteristicUuid,
                 cancellationToken);
@@ -85,7 +101,7 @@ internal sealed class BleEdgeUnitProvisioningAdapter : IEdgeUnitProvisioningTran
         finally
         {
             // Always tear down the connection, even when writing or reading throws.
-            await SafeDisconnectAsync(deviceId);
+            await SafeDisconnectAsync(address);
         }
     }
 

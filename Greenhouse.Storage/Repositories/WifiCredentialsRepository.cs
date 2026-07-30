@@ -12,50 +12,53 @@ namespace Greenhouse.Storage.Repositories;
 /// </summary>
 public sealed class WifiCredentialsRepository : IWifiCredentialsRepository
 {
-    private readonly GreenhouseDbContext _context;
+    private readonly GreenhouseDatabase _database;
 
-    public WifiCredentialsRepository(GreenhouseDbContext context)
+    public WifiCredentialsRepository(GreenhouseDatabase database)
     {
-        _context = context;
+        _database = database;
     }
 
-    public async Task<WifiCredentials?> GetAsync()
-    {
-        var entity = await _context.WifiCredentials.AsNoTracking().FirstOrDefaultAsync();
-        return entity is null ? null : new WifiCredentials(entity.NetworkName, entity.Password);
-    }
-
-    public async Task SaveAsync(WifiCredentials credentials)
-    {
-        var entity = await _context.WifiCredentials.FirstOrDefaultAsync();
-        if (entity is null)
+    public Task<WifiCredentials?> GetAsync() =>
+        _database.ExecuteAsync(async (context, ct) =>
         {
-            _context.WifiCredentials.Add(new WifiCredentialsEntity
+            var entity = await context.WifiCredentials.AsNoTracking().FirstOrDefaultAsync(ct);
+            return entity is null ? null : new WifiCredentials(entity.NetworkName, entity.Password);
+        });
+
+    public Task SaveAsync(WifiCredentials credentials) =>
+        _database.ExecuteAsync(async (context, ct) =>
+        {
+            var entity = await context.WifiCredentials.FirstOrDefaultAsync(ct);
+            if (entity is null)
             {
-                NetworkName = credentials.NetworkName,
-                Password = credentials.Password,
-                SavedAt = DateTime.UtcNow,
-            });
-        }
-        else
+                context.WifiCredentials.Add(new WifiCredentialsEntity
+                {
+                    NetworkName = credentials.NetworkName,
+                    Password = credentials.Password,
+                    SavedAt = DateTime.UtcNow,
+                });
+            }
+            else
+            {
+                entity.NetworkName = credentials.NetworkName;
+                entity.Password = credentials.Password;
+                entity.SavedAt = DateTime.UtcNow;
+            }
+
+            await context.SaveChangesAsync(ct);
+        });
+
+    public Task DeleteAsync() =>
+        _database.ExecuteAsync(async (context, ct) =>
         {
-            entity.NetworkName = credentials.NetworkName;
-            entity.Password = credentials.Password;
-            entity.SavedAt = DateTime.UtcNow;
-        }
+            var entity = await context.WifiCredentials.FirstOrDefaultAsync(ct);
+            if (entity is null)
+            {
+                return;
+            }
 
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task DeleteAsync()
-    {
-        var entity = await _context.WifiCredentials.FirstOrDefaultAsync();
-        if (entity is null)
-        {
-            return;
-        }
-
-        _context.WifiCredentials.Remove(entity);
-        await _context.SaveChangesAsync();
-    }
+            context.WifiCredentials.Remove(entity);
+            await context.SaveChangesAsync(ct);
+        });
 }

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 
@@ -20,6 +21,9 @@ internal sealed class BlueZBleTransport : IBleTransport
 {
     private const string Executable = "bluetoothctl";
 
+    /// <summary>How long a scan teardown may take before the subprocess is killed instead.</summary>
+    private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+
     private readonly ILogger<BlueZBleTransport> _logger;
 
     public BlueZBleTransport(ILogger<BlueZBleTransport> logger)
@@ -27,25 +31,117 @@ internal sealed class BlueZBleTransport : IBleTransport
         _logger = logger;
     }
 
-    public async Task<IReadOnlyList<BleDeviceInfo>> ScanAsync(
+    public async IAsyncEnumerable<BleDeviceInfo> ScanAsync(
         BleScanFilter filter,
-        CancellationToken cancellationToken)
+        TimeSpan duration,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        // Scan for the lifetime of the token, or a bounded default if none is supplied.
-        var duration = TimeSpan.FromSeconds(10);
-        var output = await RunSessionAsync(
-            async (stdin, ct) =>
-            {
-                await stdin.WriteLineAsync("scan on");
-                await stdin.FlushAsync(ct);
-                await Task.Delay(duration, ct);
-                await stdin.WriteLineAsync("scan off");
-                await stdin.WriteLineAsync("quit");
-                await stdin.FlushAsync(ct);
-            },
-            cancellationToken);
+        // Read bluetoothctl's output line by line rather than waiting for the process to exit,
+        // so a candidate reaches the operator the moment it advertises instead of after the
+        // whole scan window closes.
+        using var process = StartProcess();
 
-        return ParseScanOutput(output, filter);
+        // The window is closed by racing each read against a timer, never by cancelling the read
+        // itself: a pending read on a child process pipe does not observe cancellation on Linux,
+        // so a silent bluetoothctl would otherwise park here forever — past the scan duration,
+        // deaf to an explicit cancel, and blocking daemon shutdown.
+        var window = WindowAsync(duration, cancellationToken);
+        var accumulator = new ScanAccumulator();
+
+        try
+        {
+            await process.StandardInput.WriteLineAsync("scan on");
+            await process.StandardInput.FlushAsync();
+
+            while (true)
+            {
+                var read = process.StandardOutput.ReadLineAsync();
+
+                if (await Task.WhenAny(read, window) != read)
+                {
+                    // Window elapsed or the caller cancelled. The abandoned read completes when
+                    // the finally block below tears the process down and closes the pipe.
+                    Forget(read);
+                    break;
+                }
+
+                var line = await read;
+                if (line is null)
+                {
+                    break;
+                }
+
+                var updated = accumulator.Apply(line, filter);
+                if (updated is not null)
+                {
+                    yield return updated;
+                }
+            }
+        }
+        finally
+        {
+            await StopScanAsync(process);
+            StopProcess(process);
+        }
+    }
+
+    /// <summary>
+    /// Completes when <paramref name="duration"/> elapses or <paramref name="cancellationToken"/>
+    /// is cancelled — never faults, so it is safe to race against a read.
+    /// </summary>
+    private static async Task WindowAsync(TimeSpan duration, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(duration, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation closes the window exactly as the timer would.
+        }
+    }
+
+    /// <summary>Observes an abandoned task's outcome so it cannot surface as unobserved.</summary>
+    private static void Forget(Task task) =>
+        _ = task.ContinueWith(
+            static t => _ = t.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    /// <summary>
+    /// Best-effort graceful shutdown so the adapter is not left scanning. Bounded as a whole: a
+    /// wedged subprocess can block the stdin write as easily as the exit wait, and the caller
+    /// always follows this with a kill.
+    /// </summary>
+    private async Task StopScanAsync(Process process)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        var graceful = GracefulStopAsync(process);
+        if (await Task.WhenAny(graceful, Task.Delay(GracefulStopTimeout)) != graceful)
+        {
+            Forget(graceful);
+            _logger.LogDebug("bluetoothctl did not shut down within {Timeout}; killing it.", GracefulStopTimeout);
+        }
+    }
+
+    private async Task GracefulStopAsync(Process process)
+    {
+        try
+        {
+            await process.StandardInput.WriteLineAsync("scan off");
+            await process.StandardInput.WriteLineAsync("quit");
+            await process.StandardInput.FlushAsync();
+            await process.WaitForExitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "bluetoothctl did not shut down cleanly after scanning.");
+        }
     }
 
     public async Task ConnectAsync(string deviceId, CancellationToken cancellationToken)
@@ -128,66 +224,94 @@ internal sealed class BlueZBleTransport : IBleTransport
     }
 
     /// <summary>
-    /// Parses <c>bluetoothctl</c> scan output into devices, applying <paramref name="filter"/>.
-    /// Ordered by descending RSSI so the nearest unit sorts first.
+    /// Parses a complete <c>bluetoothctl</c> scan transcript into devices, applying
+    /// <paramref name="filter"/>. Ordered by descending RSSI so the nearest unit sorts first.
+    /// Shares its line handling with the streaming scan.
     /// </summary>
     internal static IReadOnlyList<BleDeviceInfo> ParseScanOutput(string output, BleScanFilter filter)
     {
-        var devices = new Dictionary<string, MutableDevice>(StringComparer.OrdinalIgnoreCase);
+        var accumulator = new ScanAccumulator();
 
-        foreach (var rawLine in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            accumulator.Apply(line, filter);
+        }
+
+        return accumulator.Matching(filter);
+    }
+
+    /// <summary>
+    /// Incremental parser for <c>bluetoothctl</c> scan output. It holds the devices seen so far
+    /// so that attribute updates arriving on later lines (RSSI in particular) are merged onto the
+    /// device the name line introduced.
+    /// </summary>
+    private sealed class ScanAccumulator
+    {
+        private readonly Dictionary<string, MutableDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Applies one output line. Returns the device when the line changed a matching,
+        /// named device — that is, when there is something new to report — otherwise null.
+        /// </summary>
+        public BleDeviceInfo? Apply(string rawLine, BleScanFilter filter)
         {
             var line = rawLine.Trim();
             var deviceIndex = line.IndexOf("Device ", StringComparison.Ordinal);
             if (deviceIndex < 0)
             {
-                continue;
+                return null;
             }
 
             var deviceText = line[(deviceIndex + "Device ".Length)..];
             var spaceIndex = deviceText.IndexOf(' ');
             if (spaceIndex <= 0)
             {
-                continue;
+                return null;
             }
 
             var address = deviceText[..spaceIndex];
             var remainder = deviceText[(spaceIndex + 1)..].Trim();
 
-            if (!devices.TryGetValue(address, out var device))
+            if (!_devices.TryGetValue(address, out var device))
             {
                 device = new MutableDevice(address);
-                devices[address] = device;
+                _devices[address] = device;
             }
+
+            var changed = false;
 
             if (remainder.StartsWith("Name:", StringComparison.OrdinalIgnoreCase)
                 || remainder.StartsWith("Alias:", StringComparison.OrdinalIgnoreCase))
             {
-                device.Name = remainder[(remainder.IndexOf(':') + 1)..].Trim();
+                changed = device.SetName(remainder[(remainder.IndexOf(':') + 1)..].Trim());
             }
             else if (remainder.StartsWith("RSSI:", StringComparison.OrdinalIgnoreCase)
                      && int.TryParse(remainder[(remainder.IndexOf(':') + 1)..].Trim(), out var rssi))
             {
-                device.Rssi = rssi;
+                changed = device.SetRssi(rssi);
             }
             else if (!remainder.Contains(':'))
             {
                 // Inline advertised name form: "Device <address> <name>". Attribute updates
                 // (RSSI:, Connected:, ServicesResolved:, ...) all contain a colon and are ignored here.
-                device.Name = remainder;
+                changed = device.SetName(remainder);
             }
+
+            return changed && MatchesFilter(device.Name, filter) ? device.ToDeviceInfo() : null;
         }
 
-        return devices.Values
-            .Where(device => MatchesFilter(device.Name, filter))
-            .OrderByDescending(device => device.Rssi ?? int.MinValue)
-            .Select(device => new BleDeviceInfo(device.Address, device.Name, device.Rssi))
-            .ToArray();
-    }
+        public IReadOnlyList<BleDeviceInfo> Matching(BleScanFilter filter) =>
+            _devices.Values
+                .Where(device => MatchesFilter(device.Name, filter))
+                .OrderByDescending(device => device.Rssi ?? int.MinValue)
+                .Select(device => device.ToDeviceInfo())
+                .ToArray();
 
-    private static bool MatchesFilter(string name, BleScanFilter filter) =>
-        filter.NamePrefix is null
-        || name.StartsWith(filter.NamePrefix, StringComparison.OrdinalIgnoreCase);
+        private static bool MatchesFilter(string name, BleScanFilter filter) =>
+            name.Length > 0
+            && (filter.NamePrefix is null
+                || name.StartsWith(filter.NamePrefix, StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>Extracts the hex byte tokens from a <c>bluetoothctl read</c> value dump.</summary>
     internal static byte[] ParseReadValue(string output)
@@ -206,11 +330,9 @@ internal sealed class BlueZBleTransport : IBleTransport
         return bytes.ToArray();
     }
 
-    private async Task<string> RunSessionAsync(
-        Func<StreamWriter, CancellationToken, Task> drive,
-        CancellationToken cancellationToken)
+    private static Process StartProcess()
     {
-        using var process = new Process
+        var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -229,8 +351,18 @@ internal sealed class BlueZBleTransport : IBleTransport
         }
         catch (Exception ex)
         {
+            process.Dispose();
             throw new BleTransportException("bluetoothctl is not available on this host.", ex);
         }
+
+        return process;
+    }
+
+    private async Task<string> RunSessionAsync(
+        Func<StreamWriter, CancellationToken, Task> drive,
+        CancellationToken cancellationToken)
+    {
+        using var process = StartProcess();
 
         try
         {
@@ -265,9 +397,35 @@ internal sealed class BlueZBleTransport : IBleTransport
     {
         public string Address { get; } = address;
 
-        public string Name { get; set; } = string.Empty;
+        public string Name { get; private set; } = string.Empty;
 
-        public int? Rssi { get; set; }
+        public int? Rssi { get; private set; }
+
+        /// <summary>Returns true when the value actually changed.</summary>
+        public bool SetName(string name)
+        {
+            if (name.Length == 0 || string.Equals(Name, name, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            Name = name;
+            return true;
+        }
+
+        /// <summary>Returns true when the value actually changed.</summary>
+        public bool SetRssi(int rssi)
+        {
+            if (Rssi == rssi)
+            {
+                return false;
+            }
+
+            Rssi = rssi;
+            return true;
+        }
+
+        public BleDeviceInfo ToDeviceInfo() => new(Address, Name, Rssi);
     }
 }
 

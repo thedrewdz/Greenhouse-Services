@@ -34,6 +34,16 @@ public class BlueZBleTransportTests
     }
 
     [Fact]
+    public void ParseScanOutput_ignores_devices_that_never_advertised_a_name()
+    {
+        const string output = "[CHG] Device AA:BB:CC:DD:EE:04 RSSI: -30\n";
+
+        var devices = BlueZBleTransport.ParseScanOutput(output, new BleScanFilter());
+
+        Assert.Empty(devices);
+    }
+
+    [Fact]
     public void ParseReadValue_extracts_hex_bytes()
     {
         const string output = "Attribute value:\n  Value: 0x7b 0x22 0x6f 0x6b 0x22 0x7d\n";

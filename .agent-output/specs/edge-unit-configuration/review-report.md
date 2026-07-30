@@ -115,3 +115,78 @@ verification and a decision on #48 part 2. Recorded in `spec-status.md`.
 See `doc-feedback.md`. Systemic items were filed as issues in `Greenhouse-Documentation`; the
 pre-existing gap (drift notification channel, Main Unit onboarding error codes) was already filed by
 the implementation pass as Greenhouse-Documentation#32.
+
+---
+
+# Review Round 2 — independent review of `041c86f`
+
+`2026-07-30` · This is the pass `spec-status.md` gate 1 and retrospective follow-up 1 called for: an
+independent review of the review-fix commit, performed as a separate pass over the PR rather than by
+the author of the fixes. Scope: PR #45 whole diff, with `041c86f` in focus. Checkout verified at PR
+head `a16c655`.
+
+## Verification Commands Run
+
+- `dotnet build` → clean
+- `dotnet test` → **251 passed, 0 failed** (confirms the PR body's claim at that commit)
+- Daemon smoke test on loopback: `GET /api/onboarding`, `GET /api/edge-units`, OpenAPI path list
+- Standalone DI probe against `Microsoft.Extensions.DependencyInjection` 8.0.0 (see finding #52)
+
+## First-Round Findings Re-Checked
+
+| Issue | Verdict |
+|---|---|
+| #46 | **Fixed, and structurally.** Pure `HeartbeatReconciliation.Reconcile` + `RecordHeartbeatAsync` inside one `ExecuteAsync`; `UpsertAsync` gone from the codebase entirely (zero references). Closes the class, not the instance. |
+| #47 | **Correct by construction.** Read raced against a window task, bounded teardown, process tree killed, abandoned read observed. Rightly left open for on-device verification. |
+| #48 pt.1 | **Fixed**, with three regression tests. |
+| #49 | **Partially fixed.** The narrow case only — see #51. |
+| #50 | **7 of 8.** Item 8 does not do what it claims — see #52. Item 1 also shipped without the test its own acceptance criteria required — see #53. |
+
+## Round 2 Findings
+
+6. **#51 — a stale failure can still fail a *newly started* session.** #49's fix guards `FailAsync`
+   on `_status == expectedStatus`, and status is not session identity. Cancel a provisioning session,
+   restart, and the second session sits in exactly the status the abandoned work still expects, so
+   session 1's late non-cancellation throw fails session 2.
+   *Evidence:* reproduced before fixing — `Expected: "provisioning" / Actual: "failed"`.
+   *Fix applied:* monotonic `_session` id, bumped wherever a session token is created and on reset to
+   idle, captured by background work and checked alongside the status.
+   *Prevention note:* #49 → #51 is one shape twice — guarding a transition on a mutable global rather
+   than on the acting session's identity.
+
+7. **#52 — the `SqliteConnection` is still never disposed; #50 item 8 was closed on a false claim.**
+   `AddSingleton(instance)` hands DI an object it did not create, and the container only disposes what
+   it creates. The commit message, the issue comment, and a new `Program.cs` comment all asserted the
+   opposite.
+   *Evidence:* a standalone probe registering one instance and one factory — only the factory-created
+   probe was disposed.
+   *Fix applied:* `await using` in `Program.cs` (a `try`/`finally` around `app.Run()`);
+   `GreenhouseDatabase` moved to a factory registration, which the repositories do resolve.
+   *Prevention note:* the claim was checkable in ten lines and nobody checked it. See retrospective
+   Round 2, pattern 2.
+
+8. **#53 — three follow-ups.** (a) `published` was gated on `attempt == 1`, so a mapping delivered on
+   a *retry* stayed at `publish-pending` — harmless before `041c86f` made that path reachable.
+   (b) `selectedDeviceId` was retained "so the operator can retry without reselecting", but the
+   idempotency guard answered 202 and started nothing. (c) #50 item 1 shipped with its acceptance
+   criterion ticked and no test behind it. All three fixed with coverage.
+
+## Not Findings, Recorded
+
+- `_lastMessageId` seeding wraps every ~11.6 days, so two restarts that far apart collide. Against a
+  local broker with `(message_id, mapping_version)` correlation, not worth more code.
+- `041c86f`'s message says heartbeat ingestion is "structurally unable to touch mapping columns". At
+  the *port* that is true and it is the load-bearing claim; `EdgeUnitRepository.Apply` does still
+  write those columns, safely, inside the gate.
+
+## Round 2 Merge Decision
+
+**Blocking findings: none.** #51 and #52 are behavioural but non-blocking; #53 is tech-debt. All are
+fixed in `1be33f4` with regression coverage. Suite **254 passed, 0 failed**; daemon re-smoke-tested.
+
+Merge remains gated, but no longer on code correctness:
+
+- Stage 5 QA has never run for this spec (on-device pass on the test Pi).
+- PR #45 still has **no recorded approval and zero CI checks** — the repository has no workflow
+  beyond `add-to-project.yml`.
+- `1be33f4` was, again, written by the pass that raised its findings. See retrospective Round 2.

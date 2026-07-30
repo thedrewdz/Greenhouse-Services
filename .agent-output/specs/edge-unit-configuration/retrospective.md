@@ -150,3 +150,142 @@ itself works, which is the user's design call, not mine.
 5. **Run artifact promotion at least once**, so `promotion-log.md` stops being theoretical.
 6. Do **not** merge PR #45, close #25, or set the board item Done until 1 and 3 are done — see the
    gate list in `spec-status.md`.
+
+---
+
+# Retrospective Round 2 (epic #25)
+
+Date: `2026-07-30` · Repo: `thedrewdz/Greenhouse-Services` · Trigger: follow-up action 1 above —
+independent review of `041c86f` — was executed, and produced findings.
+
+## Inputs
+
+- Round 2 review: `review-report.md` § "Review Round 2", issues #51, #52, #53 (all filed, fixed in
+  `1be33f4`, closed).
+- Board hygiene: #46 was found still at `Todo` on the board despite being closed; corrected.
+- Epic hygiene: #47 and #48 detached from #25 as sub-issues; #48 rescoped to part 2 and retitled.
+- Loop evidence: `5dfdb13` → `041c86f` → `1be33f4`; epic #25 comments; PR #45 body (twice corrected).
+
+## What Worked
+
+- **The previous retrospective's top follow-up was the right call, and it paid.** It predicted that
+  `041c86f` had been reviewed by nobody but its author and ranked that highest. The independent pass
+  found three issues — and, more tellingly, **two of the five first-round issues had been closed on
+  claims that were not true** (#49 fixed narrowly, #50 item 8 not fixed at all). A 40% false-close
+  rate on a single review round is not a hunch any more; it is a measurement.
+- **Removing `UpsertAsync` from the port held up under adversarial reading.** Round 2 tried to find a
+  way for heartbeat ingestion to touch mapping columns and could not. Structural fixes survive
+  re-review in a way that conditional fixes (#49's status guard) do not.
+- **Injected policy objects paid out a second time.** `ConfigurationPublishPolicy` and
+  `OnboardingTimeouts` again let #51's and #53's regression tests run in milliseconds.
+- **Reproducing before fixing changed the outcome.** #51 was written as a failing test first
+  (`Expected: "provisioning" / Actual: "failed"`). #52 was proved with a ten-line DI probe. Both would
+  have been arguable as prose; neither was arguable as output.
+- **Detaching open defects from the epic worked as intended.** #47 and #48 no longer hold #25 open for
+  work that is not epic follow-through, and the epic's sub-issue list now reads as "what #25
+  delivered".
+
+## What Failed or Repeated
+
+- **Fix completion is asserted, never demonstrated.** #50 item 8's fix was described in the commit
+  message, in the issue comment, and in a new source comment — all three wrong, and all three
+  checkable in ten lines. Separately, #50's acceptance criterion "test coverage added for items 1 and
+  3" was ticked with only item 3 covered. **Nothing in the harness asks a fix to produce evidence**;
+  it asks for a description, and a description is what it gets.
+- **The same defect shape appeared twice, again.** #49 → #51 is "guard a transition on a mutable
+  global rather than on the acting session's identity". This is the second time in this epic that a
+  fix addressed the instance and left the class (the first being #47/#41, subprocess lifetime). The
+  Round 1 retrospective already named "one blind spot, two findings" and it recurred within the same
+  delivery.
+- **Round 2 collapsed review and fix exactly as Round 1 did.** I raised #51–#53, fixed them, wrote
+  their tests, and closed them. `1be33f4` has had no independent review. The guardrail identified
+  last round was not available to me because it was filed, not applied — see Root Cause 1.
+- **The board did not follow the issue.** #46 was closed but sat at `Todo` on the board, while #49 and
+  #50 — closed in the same batch — went to `Done`. The board is the retrospective skill's "primary
+  status authority" and it was silently wrong for one item in three.
+- **PR #45 has zero CI checks and zero approvals**, at 7,414 additions. `Greenhouse-Services` has one
+  workflow, `add-to-project.yml`, which is issue-triggered. The harness's merge gate assumes an
+  approval that no mechanism produces and a check suite that does not exist. Round 1 did not catch
+  this because it never queried the PR's review state.
+
+## Root Cause Patterns
+
+1. **Guardrails filed are not guardrails applied.** Round 1 produced seven guardrail updates and
+   applied none, deferring items 1, 2 and 6 to the user as design calls — correctly. But the effect is
+   that Round 2 ran under exactly the conditions Round 1 diagnosed, and reproduced two of the same
+   failures. A finding parked in an issue queue changes nothing about the next pass. **Filed ≠ fixed
+   applies to process defects as much as to code defects.**
+
+2. **The harness verifies descriptions, not behaviour.** Every stage artifact is prose. The acceptance
+   criteria are checkboxes that the ticking party also authors. Nothing anywhere requires a fix to be
+   accompanied by output — a failing test that now passes, a probe, a command transcript. Both of
+   Round 2's substantive findings (#51, #52) were things a *description* got wrong and an *execution*
+   got right. This is distinct from the self-review problem: an independent reviewer reading prose
+   would also have missed #52.
+
+3. **The stated working preference and the harness are in direct conflict, and nobody has adjudicated
+   it.** The user's standing instruction is that every review finding is filed as an issue *and* fixed
+   on the branch in the same session. The harness routes fixable findings to
+   `ready-for-implementation` → Test → Review again, precisely so the fixer is not the reviewer.
+   Following one violates the other. Two rounds have now resolved this silently in favour of the user
+   preference and then flagged the result as a gate — which converges on nothing, because each round's
+   fixes need a round that will itself need a round. **This needs a decision, not another finding.**
+
+4. **Structural fixes survive; conditional fixes regress.** #46 (remove the capability) held up.
+   #49 (add a condition) did not. #50 item 8 (change a registration) was wrong about the framework.
+   The pattern worth generalising: prefer fixes that remove the ability to express the defect.
+
+## Never Event Follow-Through
+
+- **Blocking findings this round: none.** #51, #52 behavioural non-blocking; #53 tech-debt.
+- **Never events per `code-review-gate`: none present.** Re-checked against the Round 2 diff.
+- **Round 1's proposed never event (cross-operation read-modify-write) would not have caught #51 or
+  #52.** Two additions are proposed below to cover the shapes that actually recurred.
+- **Verification that guardrails are in place: still *no*.** Round 1's seven items remain filed and
+  unapplied (docs#33–#36 all open). This section stays open.
+
+## Guardrail Updates
+
+Round 1's items 1–7 stand unchanged and undecided. Deliberately **not applied** here: items 1, 2 and 6
+are harness-design calls the user has not made, and pre-empting them would decide docs#33–#36 by fiat.
+New this round:
+
+| # | Target | Change | From | Filed |
+|---|---|---|---|---|
+| 8 | `feature-delivery-harness.md` + `.agents/skills/implementation` | A fix must ship **evidence**, not a description: the failing-test-now-passing, a probe transcript, or a command output, quoted on the issue. Acceptance criteria may not be ticked by the author without it. | Pattern 2, #52, #50 item 1 | docs#37 |
+| 9 | `.agents/skills/code-review-gate` | Add never event: *guarding a state transition on a mutable shared value (status, flag, name) rather than on the identity of the actor the work belongs to.* | #49 → #51 | docs#38 |
+| 10 | `feature-delivery-harness.md` | Decide the review/fix separation conflict, and write the answer down either way. | Pattern 3 | docs#39 |
+| 11 | `.agents/skills/retrospective` Board Operations | Board status must be verified after closing an issue, not assumed to follow. | #46 stuck at Todo | comment on docs#36 |
+| 12 | `Greenhouse-Services` repo | No CI. The harness assumes a PR approval and check suite that do not exist for this repo. | PR #45: 0 reviews, 0 checks | docs#39 |
+
+## Loop Evidence Considered
+
+- Implementation loop count: **3** — delivery (`5dfdb13`), review-fix (`041c86f`), re-review-fix (`1be33f4`).
+- Test artifacts: still **none exist** as stage artifacts. Substituted: `dotnet test` at all three
+  commits (235 → 251 → 254 passing).
+- Review artifacts: `review-report.md`, now with an independent Round 2 section; issues #46–#53.
+- QA artifacts: **none exist.** Stage 5 has still never run.
+
+## Documentation Changes Made
+
+- `.agent-output/specs/edge-unit-configuration/review-report.md` — Round 2 section appended (the
+  independent review gate 1 required).
+- `.agent-output/specs/edge-unit-configuration/retrospective.md` — this section.
+- `.agent-output/specs/edge-unit-configuration/spec-status.md` — gates re-evaluated; gate 1 satisfied.
+- Issues #47, #48 detached from #25; #48 rescoped and retitled; #46 board status corrected to Done.
+- PR #45 body corrected twice (stale test count; stale "remain open and unchanged" claim).
+
+## Follow-Up Actions
+
+1. **Decide the review/fix separation conflict (docs#39).** Everything else is downstream of this.
+   Until it is decided, every round of fixes generates a gate that only another round can clear.
+2. **Stage 5 QA on the test Pi** — #47's scan window, #41's stderr drain, BLE provisioning against a
+   real Edge Unit, and the `ghcfg/wr-` → `ghcfg/ack-` round trip. Unchanged from Round 1.
+3. **Apply, or explicitly decline, Round 1 guardrails 1–7 (docs#33–#36).** Two rounds have now run
+   under conditions those items describe.
+4. **Add CI to `Greenhouse-Services` (docs#39)** — at minimum build + test on PR, so a merge gate
+   exists at all.
+5. **#48 part 2** — decide the reconnect seam on `IMessagingService`. Now tracked independently of
+   this epic.
+6. Do **not** merge PR #45, close #25, or set the board item Done until the skill's own step 2 gate is
+   satisfiable — see `spec-status.md`.

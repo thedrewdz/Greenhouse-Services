@@ -283,9 +283,34 @@ New this round:
    real Edge Unit, and the `ghcfg/wr-` → `ghcfg/ack-` round trip. Unchanged from Round 1.
 3. **Apply, or explicitly decline, Round 1 guardrails 1–7 (docs#33–#36).** Two rounds have now run
    under conditions those items describe.
-4. **Add CI to `Greenhouse-Services` (docs#39)** — at minimum build + test on PR, so a merge gate
-   exists at all.
+4. **Add CI to `Greenhouse-Services`** — at minimum build + test on PR, so a merge gate exists at all.
+   Filed as **Greenhouse-Services#55**.
 5. **#48 part 2** — decide the reconnect seam on `IMessagingService`. Now tracked independently of
    this epic.
-6. Do **not** merge PR #45, close #25, or set the board item Done until the skill's own step 2 gate is
-   satisfiable — see `spec-status.md`.
+6. ~~Do **not** merge PR #45, close #25, or set the board item Done until the skill's own step 2 gate
+   is satisfiable.~~ **Superseded by user decision, 2026-07-30.**
+
+## Merge Decision (user, 2026-07-30)
+
+Round 2 stopped at the retrospective skill's step 2, because PR #45 had no approval and the repository
+has no mechanism to produce one. The user overrode that stop with a condition: **merge and close, as
+long as every finding that still needs addressing has its own independent board item.**
+
+Verified before merging — 13 items, all present on Greenhouse Delivery:
+
+| Repo | Items |
+|---|---|
+| Greenhouse-Services | #41 stderr drain · #47 scan window (on-device) · #48 reconnect re-publish · **#54 Stage 5 QA** · **#55 CI** |
+| Greenhouse-Documentation | #32 drift contract · #33–#36 Round 1 guardrails · #37–#39 Round 2 guardrails |
+
+Two were filed to satisfy the condition, both previously untracked:
+
+- **#54 — Stage 5 QA, never run.** It was a gate in `spec-status.md` and a follow-up here, but never a
+  board item, so nothing would have surfaced it after the epic closed.
+- **#55 — no CI in this repository.** Split out of docs#39, which pairs it with the harness-level
+  question of what "approved" means for a single-maintainer repo. The docs issue holds the decision;
+  #55 holds the concrete workflow.
+
+What this decision does *not* do: QA has still not run, and PR #45 merged unapproved and unchecked.
+`complete` here means "delivery scope merged and remaining work independently tracked", not "verified
+against acceptance criteria". `spec-status.md` records that distinction rather than smoothing it over.

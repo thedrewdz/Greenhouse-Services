@@ -16,10 +16,11 @@ This file tracks execution lifecycle status in implementation repositories only.
 
 ## Current Status
 
-- Status: `ready-for-qa`
+- Status: `complete`
 - Updated At: `2026-07-30`
 - Updated By: `Retrospective Agent (Round 2)`
-- Reason: `Gate 1 satisfied: 041c86f received the independent review it was waiting on (review-report.md, Round 2). It produced three findings - #51, #52, #53 - all non-blocking, all fixed in 1be33f4 with regression coverage; suite 254 passed, 0 failed. No blocking code findings remain. Gates 2 and 3 no longer belong to this spec's exit: #47 is on-device verification, which is Stage 5 QA work rather than a review gate, and #48 was detached from epic #25 and rescoped to part 2, a separate IMessagingService seam decision. Moving to ready-for-qa. Complete remains blocked on Stage 5 QA never having run and on PR #45 having no approval and no CI checks - see gates below. 1be33f4 is itself unreviewed by anyone but its author; that is not tracked as a code gate but as the unresolved process conflict in retrospective Round 2, root cause 3.`
+- Reason: `Closed by user decision at merge, on the condition that every finding still needing work has its own independent board item. Verified before merging: 13 items, all on Greenhouse Delivery. Stage 5 QA has still NEVER run for this spec - it is carried out of the epic as Greenhouse-Services#54 rather than performed, so complete here means "delivery scope merged and remaining work independently tracked", not "verified against acceptance criteria on hardware". PR #45 merged with no approval and no CI checks, because the repository has no mechanism to produce either; that gap is Greenhouse-Services#55. Prior reason retained below.`
+- Prior Reason (`ready-for-qa`): `Gate 1 satisfied: 041c86f received the independent review it was waiting on (review-report.md, Round 2). It produced three findings - #51, #52, #53 - all non-blocking, all fixed in 1be33f4 with regression coverage; suite 254 passed, 0 failed. No blocking code findings remain. Gates 2 and 3 no longer belong to this spec's exit: #47 is on-device verification, which is Stage 5 QA work rather than a review gate, and #48 was detached from epic #25 and rescoped to part 2, a separate IMessagingService seam decision. Moving to ready-for-qa. Complete remains blocked on Stage 5 QA never having run and on PR #45 having no approval and no CI checks - see gates below. 1be33f4 is itself unreviewed by anyone but its author; that is not tracked as a code gate but as the unresolved process conflict in retrospective Round 2, root cause 3.`
 
 ## Allowed Status Values
 
@@ -46,17 +47,19 @@ Blocking a move to `ready-for-qa`: **none.** All three prior gates are resolved 
 3. ~~`#48` part 2.~~ **Reassigned out of this spec.** Detached from epic #25 and rescoped; the
    reconnect seam on `IMessagingService` is separate work, and part 1 shipped.
 
-Blocking a move to `complete`:
+Gates 4–6 were **carried out of this spec, not cleared**, by user decision at merge. Each is now an
+independent board item, which was the stated condition for merging:
 
-4. **Stage 5 QA has never run for this spec.** The PR's "smoke-tested with no UI present" is Stage 2
-   local verification, not a QA pass against acceptance criteria.
-5. **PR #45 has no approval and no CI checks.** `reviewDecision` is empty, `reviews` is 0, and
-   `statusCheckRollup` is 0 — the repository has no workflow beyond `add-to-project.yml`. The
-   retrospective skill's step 2 ("confirm a PR exists **and has been approved**, else comment and
-   stop") cannot currently be satisfied by any mechanism this repository has. Tracked as
-   Greenhouse-Documentation#39.
-6. **On-device QA on the test Pi**, covering `#47`'s scan window, `#41`'s stderr drain, BLE
-   provisioning against a real Edge Unit, and the `ghcfg/wr-` → `ghcfg/ack-` round trip.
+4. ~~Stage 5 QA has never run for this spec.~~ → **Greenhouse-Services#54.** Still true; the PR's
+   "smoke-tested with no UI present" is Stage 2 local verification, not a QA pass against acceptance
+   criteria. No `qa-report.md` exists for this spec, or for any spec in this repository.
+5. ~~PR #45 has no approval and no CI checks.~~ → **Greenhouse-Services#55** (the repository change)
+   and **Greenhouse-Documentation#39** (what "approved" means for a single-maintainer repo). PR #45
+   merged with `reviewDecision` empty, 0 reviews and 0 check runs — recorded plainly rather than
+   worked around.
+6. ~~On-device QA on the test Pi.~~ → folded into **Greenhouse-Services#54**, covering `#47`'s scan
+   window, `#41`'s stderr drain, BLE provisioning against a real Edge Unit, and the `ghcfg/wr-` →
+   `ghcfg/ack-` round trip.
 
 Noted, not tracked as a code gate:
 
@@ -68,4 +71,5 @@ Noted, not tracked as a code gate:
 ## Status History
 
 - `2026-07-30` | `(absent) -> ready-for-review` | `Retrospective Agent` | `Back-filled. Reconstructed lifecycle: implementation of all seven sub-issues #30-#36 completed on feature/25-edge-unit-onboarding-and-configuration (5dfdb13); code review raised five defects #46-#50; fixes applied in 041c86f; suite 235 -> 251 passing. No stage artifacts were produced during any of it.`
+- `2026-07-30` | `ready-for-qa -> complete` | `Retrospective Agent (Round 2)` | `User decision: merge and close, conditional on every finding still needing work having an independent board item. Verified 13 items on Greenhouse Delivery before merging - Greenhouse-Services #41, #47, #48, #54, #55 and Greenhouse-Documentation #32-#39. Two were filed to satisfy the condition: #54 (Stage 5 QA, never run) and #55 (repository has no CI). PR #45 merged; #25 closed; board item Done.`
 - `2026-07-30` | `ready-for-review -> ready-for-qa` | `Retrospective Agent (Round 2)` | `Independent review of 041c86f performed (review-report.md Round 2). Found #51 (stale failure can fail a newly started session - #49 fixed the instance, not the class), #52 (SqliteConnection still never disposed - #50 item 8 was closed on a false claim, disproved by a DI probe), #53 (three tech-debt follow-ups). All non-blocking, all fixed in 1be33f4, suite 251 -> 254 passing. No blocking code findings remain. Gates 2 and 3 reassigned: #47 is QA work, #48 is detached from the epic.`

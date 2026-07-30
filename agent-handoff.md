@@ -121,6 +121,36 @@ shapes, and publishes all seven new paths in OpenAPI.
 **#47 is not covered by automated tests** — it needs `bluetoothctl`, so it is verified by
 construction and belongs to the on-device work below.
 
+## Second Review Round (041c86f re-review)
+
+Re-reviewed PR #45 with 041c86f in scope. #46, #47 and #48 part 1 hold up. Three further issues
+filed (#51, #52, #53) and all fixed on this branch; suite now **254 passed, 0 failed** (was 251).
+
+- **#51 — a stale failure could still fail a *newly started* session.** #49's fix guards `FailAsync`
+  on status alone, and status is not session identity: cancel a provisioning session, restart, and
+  the second session sits in exactly the status the abandoned work still expects. Reproduced with a
+  test (`provisioning` → `failed`). Fixed by giving each session a monotonic `_session` id — bumped
+  wherever a session token is created and on reset to idle — which background work captures and
+  `FailAsync` checks alongside the status.
+- **#52 — the `SqliteConnection` was still never disposed.** #50 item 8 was recorded as fixed via
+  `AddSingleton(sqliteConnection)`, but DI only disposes what it *creates*; an instance registration
+  is never captured. Verified against `Microsoft.Extensions.DependencyInjection` 8.0.0 — only the
+  factory-registered probe was disposed. `GreenhouseDatabase` had the same gap. The connection is
+  now `await using` in `Program.cs` (a `try`/`finally` around `app.Run()`, so it closes on a faulted
+  host too) and `GreenhouseDatabase` is registered via a factory. The misleading comment is gone.
+- **#53 — three follow-ups.** (1) `published` was gated on `attempt == 1`, so a mapping that reached
+  the broker on a *retry* stayed at `publish-pending`; `AttemptOutcome.NotDelivered` now
+  distinguishes "never left the daemon" from the other retryable outcomes, and the status goes to
+  whichever attempt gets through. (2) `selectedDeviceId` was retained "so the operator can retry
+  without reselecting", but the idempotency guard swallowed the retry and answered 202 doing
+  nothing; re-selecting the same device from `failed` now re-provisions. (3) #50 item 1 shipped
+  without the test its acceptance criteria required — `FakeOnboardingSessionRepository` gained a
+  `FailNextRead` seam and the load is now proven to be retried rather than latched.
+
+Re-verified after these fixes: `dotnet build` clean, 254 tests pass, and the daemon still starts with
+no UI present, migrates on first run, serves `GET /api/onboarding` and `GET /api/edge-units` with the
+documented shapes, and publishes all seven new paths in OpenAPI.
+
 ## Next Actions
 
 - On-device verification on the test Pi: BLE scan/provision against a real Edge Unit, and the

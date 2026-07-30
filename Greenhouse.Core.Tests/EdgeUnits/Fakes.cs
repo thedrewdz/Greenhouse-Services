@@ -312,8 +312,24 @@ internal sealed class FakeOnboardingSessionRepository : IOnboardingSessionReposi
 
     public int ClearCount { get; private set; }
 
-    public Task<OnboardingSession?> GetCurrentAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult(Current);
+    public int GetCurrentCount { get; private set; }
+
+    /// <summary>When set, the next read throws this instead of returning <see cref="Current"/>.</summary>
+    public Exception? FailNextRead { get; set; }
+
+    public Task<OnboardingSession?> GetCurrentAsync(CancellationToken cancellationToken = default)
+    {
+        GetCurrentCount++;
+
+        if (FailNextRead is not null)
+        {
+            var failure = FailNextRead;
+            FailNextRead = null;
+            throw failure;
+        }
+
+        return Task.FromResult(Current);
+    }
 
     public Task SaveAsync(OnboardingSession session, CancellationToken cancellationToken = default)
     {

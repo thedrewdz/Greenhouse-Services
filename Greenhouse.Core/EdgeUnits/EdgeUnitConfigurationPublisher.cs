@@ -155,9 +155,15 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
         var messageId = Interlocked.Increment(ref _lastMessageId);
         var payload = BuildPayload(unit, messageId, request.MappingReason);
 
+        // The mapping is 'published' from the first attempt that actually reaches the broker, which
+        // is not necessarily the first attempt: a broker that is down for the first one leaves the
+        // status to be claimed by whichever retry gets through.
+        var published = false;
+
         for (var attempt = 1; attempt <= _policy.MaxAttempts; attempt++)
         {
-            var outcome = await AttemptAsync(unit, payload, messageId, attempt, cancellationToken);
+            var outcome = await AttemptAsync(unit, payload, messageId, attempt, published, cancellationToken);
+            published |= outcome is not AttemptOutcome.NotDelivered;
 
             if (outcome is AttemptOutcome.Acknowledged)
             {
@@ -182,15 +188,20 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
 
     /// <summary>
     /// One publish-and-await-ack attempt. Every failure mode that another attempt could plausibly
-    /// fix — a transport error, an ack timeout, a retryable rejection — returns
-    /// <see cref="AttemptOutcome.Retry"/> rather than throwing, so a single request can never
-    /// escape the retry budget and leave the unit stranded at <c>publish-pending</c>.
+    /// fix — a transport error, an ack timeout, a retryable rejection — is returned rather than
+    /// thrown, so a single request can never escape the retry budget and leave the unit stranded
+    /// at <c>publish-pending</c>.
     /// </summary>
+    /// <param name="alreadyPublished">
+    /// Whether an earlier attempt already reached the broker, and so already moved the unit to
+    /// <see cref="MappingStatuses.Published"/>.
+    /// </param>
     private async Task<AttemptOutcome> AttemptAsync(
         EdgeUnit unit,
         string payload,
         int messageId,
         int attempt,
+        bool alreadyPublished,
         CancellationToken cancellationToken)
     {
         // Retries reuse the same message_id and mapping_version so the Edge Unit can
@@ -226,10 +237,10 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
                     _policy.MaxAttempts,
                     ex.Message);
 
-                return AttemptOutcome.Retry;
+                return AttemptOutcome.NotDelivered;
             }
 
-            if (attempt == 1)
+            if (!alreadyPublished)
             {
                 await _edgeUnits.UpdateMappingStatusAsync(
                     unit.DeviceId,
@@ -282,6 +293,13 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
 
         /// <summary>Another attempt may help, budget permitting.</summary>
         Retry,
+
+        /// <summary>
+        /// The payload never reached the broker — a transport failure. Retryable like
+        /// <see cref="Retry"/>, but distinct because it leaves the mapping unpublished, so
+        /// <see cref="MappingStatuses.Published"/> is still a later attempt's to claim.
+        /// </summary>
+        NotDelivered,
 
         /// <summary>The unit refused in a way a resend cannot fix; stop now.</summary>
         Rejected,

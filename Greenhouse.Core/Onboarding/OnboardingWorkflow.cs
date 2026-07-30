@@ -56,6 +56,14 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
     private CancellationTokenSource? _heartbeatCts;
     private Task _background = Task.CompletedTask;
 
+    /// <summary>
+    /// Identifies the current session. Background work captures the value it was started under, so
+    /// a transition it asks for can be recognised as belonging to a session that has since ended.
+    /// Status alone is not enough: the operator restarting after a cancel lands in the same status
+    /// the abandoned work still expects.
+    /// </summary>
+    private int _session;
+
     public OnboardingWorkflow(
         IEdgeUnitProvisioningTransport transport,
         IWifiCredentialsRepository credentials,
@@ -133,13 +141,14 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             _sessionCts?.Dispose();
             _sessionCts = new CancellationTokenSource();
             var sessionToken = _sessionCts.Token;
+            var session = ++_session;
 
             await PersistAsync(cancellationToken);
             state = Snapshot();
 
             // Scanning must begin promptly and continue independently of the request that asked
             // for it: navigating away in the UI must not stop the backend scan.
-            Track(Task.Run(() => RunScanAsync(sessionToken), CancellationToken.None));
+            Track(Task.Run(() => RunScanAsync(session, sessionToken), CancellationToken.None));
         }
         finally
         {
@@ -162,14 +171,18 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         {
             await EnsureLoadedAsync(cancellationToken);
 
-            // Idempotent: the same start request for the device already being provisioned
-            // returns current state instead of repeating BLE work.
-            if (string.Equals(_selectedDeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            var sameDevice = string.Equals(_selectedDeviceId, deviceId, StringComparison.OrdinalIgnoreCase);
+
+            // Idempotent: the same start request for the device already being onboarded returns
+            // current state instead of repeating BLE work. A failed session is the exception — it
+            // keeps its device precisely so the operator can retry without reselecting, so the
+            // repeat must actually provision again rather than acknowledge and do nothing.
+            if (sameDevice && _status != OnboardingStatuses.Failed)
             {
                 return new SelectDeviceResult.Accepted(Snapshot());
             }
 
-            if (_selectedDeviceId is not null)
+            if (!sameDevice && _selectedDeviceId is not null)
             {
                 return new SelectDeviceResult.DifferentDeviceSelected(Snapshot());
             }
@@ -189,13 +202,14 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             var previousSession = _sessionCts;
             _sessionCts = new CancellationTokenSource();
             var sessionToken = _sessionCts.Token;
+            var session = ++_session;
             previousSession?.Cancel();
             previousSession?.Dispose();
 
             await PersistAsync(cancellationToken);
             state = Snapshot();
 
-            Track(Task.Run(() => RunProvisioningAsync(candidate, sessionToken), CancellationToken.None));
+            Track(Task.Run(() => RunProvisioningAsync(session, candidate, sessionToken), CancellationToken.None));
         }
         finally
         {
@@ -293,7 +307,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         await NotifyStateAsync(state);
     }
 
-    private async Task RunScanAsync(CancellationToken sessionToken)
+    private async Task RunScanAsync(int session, CancellationToken sessionToken)
     {
         try
         {
@@ -335,7 +349,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         }
         catch (Exception ex)
         {
-            await FailAsync(OnboardingStatuses.Scanning, errorCode: null, $"BLE scan failed: {ex.Message}");
+            await FailAsync(session, OnboardingStatuses.Scanning, errorCode: null, $"BLE scan failed: {ex.Message}");
         }
     }
 
@@ -366,11 +380,11 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         await NotifyStateAsync(state);
     }
 
-    private async Task RunProvisioningAsync(ProvisionableUnit candidate, CancellationToken sessionToken)
+    private async Task RunProvisioningAsync(int session, ProvisionableUnit candidate, CancellationToken sessionToken)
     {
         try
         {
-            var payload = await BuildPayloadAsync(candidate, sessionToken);
+            var payload = await BuildPayloadAsync(session, candidate, sessionToken);
             if (payload is null)
             {
                 return;
@@ -379,12 +393,13 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             var result = await _transport.ProvisionUnitAsync(candidate, payload, sessionToken);
             if (result is ProvisioningResult.Failed failed)
             {
-                // Keep the selected device so the operator can retry without reselecting.
-                await FailAsync(OnboardingStatuses.Provisioning, failed.ErrorCode, failed.ErrorMessage);
+                // Keep the selected device so the operator can retry without reselecting: a repeat
+                // start request for it re-enters provisioning.
+                await FailAsync(session, OnboardingStatuses.Provisioning, failed.ErrorCode, failed.ErrorMessage);
                 return;
             }
 
-            await AwaitFirstHeartbeatAsync(sessionToken);
+            await AwaitFirstHeartbeatAsync(session, sessionToken);
         }
         catch (OperationCanceledException)
         {
@@ -393,6 +408,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         catch (Exception ex)
         {
             await FailAsync(
+                session,
                 OnboardingStatuses.Provisioning,
                 errorCode: null,
                 $"Provisioning failed: {ex.Message}");
@@ -405,6 +421,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
     /// required value is unavailable.
     /// </summary>
     private async Task<ProvisioningPayload?> BuildPayloadAsync(
+        int session,
         ProvisionableUnit candidate,
         CancellationToken cancellationToken)
     {
@@ -412,6 +429,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         if (credentials is null || string.IsNullOrWhiteSpace(credentials.NetworkName))
         {
             await FailAsync(
+                session,
                 OnboardingStatuses.Provisioning,
                 WifiSsidEmpty,
                 "No WiFi credentials are stored on the Main Unit; complete Main Unit setup first.");
@@ -422,6 +440,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         if (localAddress is null)
         {
             await FailAsync(
+                session,
                 OnboardingStatuses.Provisioning,
                 MqttBrokerUriInvalid,
                 "The Main Unit has no local network address, so the MQTT broker URI cannot be derived.");
@@ -436,7 +455,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             $"mqtt://{localAddress}:{BrokerPort}");
     }
 
-    private async Task AwaitFirstHeartbeatAsync(CancellationToken sessionToken)
+    private async Task AwaitFirstHeartbeatAsync(int session, CancellationToken sessionToken)
     {
         OnboardingState accepted;
         CancellationToken heartbeatToken;
@@ -477,25 +496,30 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
 
         // Main Unit never auto-retries after this timeout: the operator restarts from the UI.
         await FailAsync(
+            session,
             OnboardingStatuses.AwaitingHeartbeat,
             errorCode: null,
             $"No heartbeat was received within {_timeouts.Heartbeat.TotalSeconds:0} seconds of provisioning.");
     }
 
     /// <summary>
-    /// Fails the session, but only while it is still in <paramref name="expectedStatus"/> — the
-    /// state the failing work owns. A cancel that already moved the session to idle must not be
-    /// overwritten by a transport exception that arrives afterwards, which is otherwise exactly
-    /// what happens when the transport throws something other than a cancellation.
+    /// Fails the session, but only while <paramref name="session"/> is still the current one and it
+    /// is still in <paramref name="expectedStatus"/> — the state the failing work owns.
     /// </summary>
-    private async Task FailAsync(string expectedStatus, int? errorCode, string errorMessage)
+    /// <remarks>
+    /// Both guards are needed. The status alone stops a cancel-to-idle from being overwritten by a
+    /// transport exception that arrives afterwards; the session id stops the same exception from
+    /// failing a <em>different</em> session the operator started in the meantime, which lands in
+    /// exactly the status the abandoned work is still expecting.
+    /// </remarks>
+    private async Task FailAsync(int session, string expectedStatus, int? errorCode, string errorMessage)
     {
         OnboardingState state;
 
         await _mutex.WaitAsync(CancellationToken.None);
         try
         {
-            if (_status != expectedStatus)
+            if (_session != session || _status != expectedStatus)
             {
                 return;
             }
@@ -554,6 +578,10 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         _heartbeatCts?.Cancel();
         _heartbeatCts?.Dispose();
         _heartbeatCts = null;
+
+        // Ends the session outright: work still unwinding belongs to a session that no longer
+        // exists and must not transition whatever the operator starts next.
+        _session++;
 
         _candidates.Clear();
         _status = OnboardingStatuses.Idle;

@@ -33,11 +33,12 @@ builder.Services.AddSwaggerGen();
 // This ensures EF Core's migration executor sees schema changes (e.g. __EFMigrationsHistory)
 // across all commands without relying on SQLite's schema cache being refreshed between
 // connection pool checkouts, which is unreliable on Linux ARM64 with WAL mode.
-// Disposed via the DI container so the connection's lifetime is explicit and tied to the host,
-// rather than relying on process exit to release it.
-var sqliteConnection = new SqliteConnection(builder.Configuration.GetConnectionString("Default"));
-sqliteConnection.Open();
-builder.Services.AddSingleton(sqliteConnection);
+//
+// Owned here rather than by the container: DI only disposes what it creates itself, so an
+// AddSingleton(instance) registration would never be closed. `await using` on a top-level
+// statement compiles to a try/finally around app.Run(), so it closes on a faulted host too.
+await using var sqliteConnection = new SqliteConnection(builder.Configuration.GetConnectionString("Default"));
+await sqliteConnection.OpenAsync();
 var dbOptions = new DbContextOptionsBuilder<GreenhouseDbContext>()
     .UseSqlite(sqliteConnection)
     .Options;
@@ -46,7 +47,8 @@ var dbOptions = new DbContextOptionsBuilder<GreenhouseDbContext>()
 // shared connection is never used concurrently — background heartbeat and configuration work now
 // writes outside any request. It also lets repositories be singletons, which is what long-lived
 // services need to depend on them without capturing a request scope.
-builder.Services.AddSingleton(new GreenhouseDatabase(dbOptions));
+// Registered as a factory, not an instance, so the container disposes it with the host.
+builder.Services.AddSingleton(_ => new GreenhouseDatabase(dbOptions));
 
 // Repositories
 builder.Services.AddSingleton<IMainConfigRepository, MainConfigRepository>();

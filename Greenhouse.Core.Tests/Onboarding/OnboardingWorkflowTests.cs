@@ -410,6 +410,90 @@ public class OnboardingWorkflowTests
     }
 
     [Fact]
+    public async Task A_stale_failure_does_not_fail_a_session_started_after_the_cancel()
+    {
+        var harness = new Harness();
+        var releaseAbandoned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdRestarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Transport.Candidates.Add(Candidate());
+        harness.Transport.HoldProvision = releaseAbandoned.Task;
+        harness.Transport.ProvisionThrows = new InvalidOperationException("GATT teardown failed");
+
+        // Session 1: provisioning, then cancelled.
+        await harness.Workflow.StartOnboardingScanAsync();
+        await harness.WaitForStatusAsync(OnboardingStatuses.CandidatesReady);
+        await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+        await harness.Transport.ProvisionStarted.Task;
+        await harness.Workflow.CancelOnboardingAsync(DeviceId);
+
+        // Session 2: the operator restarts immediately and is provisioning again — the very status
+        // session 1's abandoned work is still expecting.
+        harness.Transport.HoldProvision = holdRestarted.Task;
+        await harness.Workflow.StartOnboardingScanAsync();
+        await harness.WaitForStatusAsync(OnboardingStatuses.CandidatesReady);
+        await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+        await harness.WaitForStatusAsync(OnboardingStatuses.Provisioning);
+
+        releaseAbandoned.SetResult();
+
+        for (var i = 0; i < 20; i++)
+        {
+            await Task.Delay(10);
+            Assert.Equal(OnboardingStatuses.Provisioning, (await harness.Workflow.GetStateAsync()).Status);
+        }
+
+        Assert.Null((await harness.Workflow.GetStateAsync()).ErrorMessage);
+
+        holdRestarted.SetResult();
+        await harness.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Restarting_a_failed_session_for_the_same_device_provisions_again()
+    {
+        await using var harness = new Harness();
+        harness.Transport.Candidates.Add(Candidate());
+        harness.Transport.ProvisionThrows = new InvalidOperationException("GATT write failed");
+
+        await harness.Workflow.StartOnboardingScanAsync();
+        await harness.WaitForStatusAsync(OnboardingStatuses.CandidatesReady);
+        await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+        await harness.WaitForStatusAsync(OnboardingStatuses.Failed);
+
+        // The retry the retained selectedDeviceId exists for: same device, no rescan.
+        harness.Transport.ProvisionThrows = null;
+        var result = await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+
+        Assert.IsType<SelectDeviceResult.Accepted>(result);
+        await harness.WaitForStatusAsync(OnboardingStatuses.AwaitingHeartbeat);
+
+        var state = await harness.Workflow.GetStateAsync();
+        Assert.Null(state.ErrorMessage);
+        Assert.Equal(DeviceId, state.SelectedDeviceId);
+    }
+
+    [Fact]
+    public async Task A_failed_session_load_is_retried_rather_than_latched()
+    {
+        await using var harness = new Harness();
+        harness.Sessions.Current = new OnboardingSession(
+            OnboardingStatuses.MappingRequired,
+            DeviceId,
+            DateTime.UtcNow,
+            DateTime.UtcNow);
+        harness.Sessions.FailNextRead = new InvalidOperationException("database is locked");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Workflow.GetStateAsync());
+
+        // The failed read must not latch the workflow into reporting idle for the process lifetime.
+        var state = await harness.Workflow.GetStateAsync();
+
+        Assert.Equal(OnboardingStatuses.MappingRequired, state.Status);
+        Assert.Equal(DeviceId, state.SelectedDeviceId);
+        Assert.Equal(2, harness.Sessions.GetCurrentCount);
+    }
+
+    [Fact]
     public async Task A_genuine_provisioning_exception_still_fails_the_session()
     {
         await using var harness = new Harness();

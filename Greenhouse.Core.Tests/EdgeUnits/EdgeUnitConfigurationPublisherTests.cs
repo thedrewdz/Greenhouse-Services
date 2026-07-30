@@ -347,6 +347,13 @@ public class EdgeUnitConfigurationPublisherTests
         await harness.WaitForStatusAsync(MappingStatuses.Acknowledged);
 
         Assert.Equal(2, harness.Messaging.Published.Count);
+
+        // 'published' belongs to the attempt that actually reached the broker, not to attempt 1:
+        // the mapping was on the wire before the ack, and the status has to say so.
+        Assert.Contains(harness.Units.StatusUpdates, u => u.Status == MappingStatuses.Published);
+        Assert.Equal(
+            new[] { MappingStatuses.Published, MappingStatuses.Acknowledged },
+            harness.Units.StatusUpdates.Select(u => u.Status).ToArray());
     }
 
     [Fact]

@@ -6,4 +6,13 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!--
+      Logging abstractions only. The runtime configuration publish/ack audit trail is a spec
+      requirement (specs/edge-unit-configuration/spec.md, "Reliability"), and this package is a
+      contract-only dependency - it brings no transport, storage, or hosting types into core.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
 </Project>

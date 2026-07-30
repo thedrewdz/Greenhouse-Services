@@ -9,7 +9,7 @@ public class WifiCredentialsRepositoryTests
     public async Task GetAsync_returns_null_when_table_is_empty()
     {
         using var db = new SqliteTestDatabase();
-        var repository = new WifiCredentialsRepository(db.CreateContext());
+        var repository = new WifiCredentialsRepository(db.Database);
 
         Assert.Null(await repository.GetAsync());
     }
@@ -19,9 +19,9 @@ public class WifiCredentialsRepositoryTests
     {
         using var db = new SqliteTestDatabase();
 
-        await new WifiCredentialsRepository(db.CreateContext())
+        await new WifiCredentialsRepository(db.Database)
             .SaveAsync(new WifiCredentials("MyNetwork", "secret"));
-        var loaded = await new WifiCredentialsRepository(db.CreateContext()).GetAsync();
+        var loaded = await new WifiCredentialsRepository(db.Database).GetAsync();
 
         Assert.NotNull(loaded);
         Assert.Equal("MyNetwork", loaded!.NetworkName);
@@ -33,12 +33,12 @@ public class WifiCredentialsRepositoryTests
     {
         using var db = new SqliteTestDatabase();
 
-        await new WifiCredentialsRepository(db.CreateContext())
+        await new WifiCredentialsRepository(db.Database)
             .SaveAsync(new WifiCredentials("FirstNetwork", "first-pass"));
-        await new WifiCredentialsRepository(db.CreateContext())
+        await new WifiCredentialsRepository(db.Database)
             .SaveAsync(new WifiCredentials("SecondNetwork", "second-pass"));
 
-        var loaded = await new WifiCredentialsRepository(db.CreateContext()).GetAsync();
+        var loaded = await new WifiCredentialsRepository(db.Database).GetAsync();
 
         Assert.Equal(1, db.CountRows("WifiCredentials"));
         Assert.NotNull(loaded);

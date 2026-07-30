@@ -5,10 +5,6 @@ namespace Greenhouse.Core.Networking;
 /// an infrastructure project and shells out to the OS network manager. Application code
 /// depends only on this interface.
 /// </summary>
-/// <remarks>
-/// <c>GetLocalAddressAsync</c> (from the full spec) is added later by the Edge Unit
-/// onboarding epic; this Phase-1 port covers connectivity and connection only.
-/// </remarks>
 public interface INetworkConnector
 {
     /// <summary>Returns <c>true</c> when the Main Unit has an active default route.</summary>
@@ -16,6 +12,14 @@ public interface INetworkConnector
 
     /// <summary>Returns the currently connected network name, or <c>null</c> when offline.</summary>
     Task<string?> GetCurrentNetworkNameAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the Main Unit's primary local IPv4 address (e.g. <c>192.168.1.50</c>), or
+    /// <c>null</c> when the unit has no usable address. Edge Unit onboarding derives the
+    /// bootstrap <c>mqtt_broker_uri</c> from this, so loopback and link-local addresses are
+    /// never returned — an Edge Unit could not reach the broker on them.
+    /// </summary>
+    Task<string?> GetLocalAddressAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Attempts to connect to <paramref name="networkName"/>. Enforces a bounded timeout

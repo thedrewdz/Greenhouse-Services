@@ -21,8 +21,15 @@ internal sealed record BleDeviceInfo(string DeviceId, string Name, int? Rssi);
 /// </summary>
 internal interface IBleTransport
 {
-    /// <summary>Scans for advertising devices matching <paramref name="filter"/>.</summary>
-    Task<IReadOnlyList<BleDeviceInfo>> ScanAsync(BleScanFilter filter, CancellationToken cancellationToken);
+    /// <summary>
+    /// Streams advertising devices matching <paramref name="filter"/> as they are observed, for
+    /// up to <paramref name="duration"/>. A device is yielded again whenever its advertised
+    /// details change — the name and the RSSI usually arrive in separate advertisements.
+    /// </summary>
+    IAsyncEnumerable<BleDeviceInfo> ScanAsync(
+        BleScanFilter filter,
+        TimeSpan duration,
+        CancellationToken cancellationToken);
 
     /// <summary>Establishes a GATT connection to <paramref name="deviceId"/>. Throws on timeout.</summary>
     Task ConnectAsync(string deviceId, CancellationToken cancellationToken);

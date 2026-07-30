@@ -11,60 +11,64 @@ namespace Greenhouse.Storage.Repositories;
 /// </summary>
 public sealed class MainConfigRepository : IMainConfigRepository
 {
-    private readonly GreenhouseDbContext _context;
+    private readonly GreenhouseDatabase _database;
 
-    public MainConfigRepository(GreenhouseDbContext context)
+    public MainConfigRepository(GreenhouseDatabase database)
     {
-        _context = context;
+        _database = database;
     }
 
-    public async Task<MainConfig?> GetAsync()
-    {
-        var entity = await _context.MainConfigs.AsNoTracking().OrderBy(e => e.Id).FirstOrDefaultAsync();
-        return entity is null ? null : MapToModel(entity);
-    }
-
-    public async Task CreateAsync(MainConfig config)
-    {
-        _context.MainConfigs.Add(new MainConfigEntity
+    public Task<MainConfig?> GetAsync() =>
+        _database.ExecuteAsync(async (context, ct) =>
         {
-            GreenhouseName = config.GreenhouseName,
-            Location = config.Location,
-            Description = config.Description,
-            CreatedAt = config.CreatedAt,
-            UpdatedAt = config.UpdatedAt,
+            var entity = await context.MainConfigs.AsNoTracking().OrderBy(e => e.Id).FirstOrDefaultAsync(ct);
+            return entity is null ? null : MapToModel(entity);
         });
 
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task UpdateAsync(MainConfig config)
-    {
-        var entity = await _context.MainConfigs.FirstOrDefaultAsync();
-        if (entity is null)
+    public Task CreateAsync(MainConfig config) =>
+        _database.ExecuteAsync(async (context, ct) =>
         {
-            return;
-        }
+            context.MainConfigs.Add(new MainConfigEntity
+            {
+                GreenhouseName = config.GreenhouseName,
+                Location = config.Location,
+                Description = config.Description,
+                CreatedAt = config.CreatedAt,
+                UpdatedAt = config.UpdatedAt,
+            });
 
-        entity.GreenhouseName = config.GreenhouseName;
-        entity.Location = config.Location;
-        entity.Description = config.Description;
-        entity.UpdatedAt = config.UpdatedAt;
+            await context.SaveChangesAsync(ct);
+        });
 
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task DeleteAsync()
-    {
-        var entity = await _context.MainConfigs.FirstOrDefaultAsync();
-        if (entity is null)
+    public Task UpdateAsync(MainConfig config) =>
+        _database.ExecuteAsync(async (context, ct) =>
         {
-            return;
-        }
+            var entity = await context.MainConfigs.FirstOrDefaultAsync(ct);
+            if (entity is null)
+            {
+                return;
+            }
 
-        _context.MainConfigs.Remove(entity);
-        await _context.SaveChangesAsync();
-    }
+            entity.GreenhouseName = config.GreenhouseName;
+            entity.Location = config.Location;
+            entity.Description = config.Description;
+            entity.UpdatedAt = config.UpdatedAt;
+
+            await context.SaveChangesAsync(ct);
+        });
+
+    public Task DeleteAsync() =>
+        _database.ExecuteAsync(async (context, ct) =>
+        {
+            var entity = await context.MainConfigs.FirstOrDefaultAsync(ct);
+            if (entity is null)
+            {
+                return;
+            }
+
+            context.MainConfigs.Remove(entity);
+            await context.SaveChangesAsync(ct);
+        });
 
     private static MainConfig MapToModel(MainConfigEntity entity) => new(
         entity.GreenhouseName,

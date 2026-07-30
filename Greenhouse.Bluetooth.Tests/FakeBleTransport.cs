@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace Greenhouse.Bluetooth.Tests;
@@ -21,17 +22,33 @@ internal sealed class FakeBleTransport : IBleTransport
 
     public int DisconnectCount { get; private set; }
 
+    public string? LastConnectedAddress { get; private set; }
+
     public BleScanFilter? LastScanFilter { get; private set; }
 
-    public Task<IReadOnlyList<BleDeviceInfo>> ScanAsync(BleScanFilter filter, CancellationToken cancellationToken)
+    public TimeSpan? LastScanDuration { get; private set; }
+
+    public async IAsyncEnumerable<BleDeviceInfo> ScanAsync(
+        BleScanFilter filter,
+        TimeSpan duration,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         LastScanFilter = filter;
-        return Task.FromResult(ScanResult);
+        LastScanDuration = duration;
+
+        foreach (var device in ScanResult)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return device;
+        }
+
+        await Task.CompletedTask;
     }
 
     public Task ConnectAsync(string deviceId, CancellationToken cancellationToken)
     {
         ConnectCount++;
+        LastConnectedAddress = deviceId;
         return Task.CompletedTask;
     }
 

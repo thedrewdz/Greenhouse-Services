@@ -9,19 +9,29 @@ namespace Greenhouse.Core.Onboarding;
 public interface IEdgeUnitProvisioningTransport
 {
     /// <summary>
-    /// Scans for Edge Units currently advertising in Provisioning Mode, for up to
-    /// <paramref name="timeout"/>. Scanning starts only when this is called — never at process startup.
+    /// Streams Edge Units advertising in Provisioning Mode as they are observed, for up to
+    /// <paramref name="timeout"/>. Scanning starts only when enumeration begins — never at
+    /// process startup — and stops when the timeout elapses, the enumeration is abandoned, or
+    /// <paramref name="cancellationToken"/> is cancelled.
     /// </summary>
-    Task<IReadOnlyList<ProvisionableUnit>> ScanForProvisionableUnitsAsync(
+    /// <remarks>
+    /// A unit may be yielded more than once: transports commonly report the advertised name
+    /// first and signal strength a moment later. Callers key observations by
+    /// <see cref="ProvisionableUnit.DeviceId"/> and treat a repeat as an update, not a new
+    /// candidate.
+    /// </remarks>
+    IAsyncEnumerable<ProvisionableUnit> ScanForProvisionableUnitsAsync(
         TimeSpan timeout,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Delivers <paramref name="payload"/> to the unit identified by <paramref name="deviceId"/>
-    /// and returns the unit's provisioning result.
+    /// Delivers <paramref name="payload"/> to <paramref name="unit"/> and returns the unit's
+    /// provisioning result. The unit is one previously yielded by
+    /// <see cref="ScanForProvisionableUnitsAsync"/>, so the transport can target it without the
+    /// caller handling transport addressing.
     /// </summary>
     Task<ProvisioningResult> ProvisionUnitAsync(
-        string deviceId,
+        ProvisionableUnit unit,
         ProvisioningPayload payload,
         CancellationToken cancellationToken = default);
 }

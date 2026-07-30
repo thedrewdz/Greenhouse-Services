@@ -17,6 +17,55 @@ namespace Greenhouse.Storage.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.28");
 
+            modelBuilder.Entity("Greenhouse.Storage.Entities.EdgeUnitEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AdvertisedName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DeviceId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastHeartbeatAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Location")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MappingStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("MappingVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("TopologyDriftDetectedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UnitName")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId")
+                        .IsUnique();
+
+                    b.ToTable("EdgeUnits", (string)null);
+                });
+
             modelBuilder.Entity("Greenhouse.Storage.Entities.MainConfigEntity", b =>
                 {
                     b.Property<int>("Id")
@@ -48,6 +97,72 @@ namespace Greenhouse.Storage.Migrations
                     b.ToTable("MainConfigs", (string)null);
                 });
 
+            modelBuilder.Entity("Greenhouse.Storage.Entities.OnboardingSessionEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SelectedDeviceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("OnboardingSessions", (string)null);
+                });
+
+            modelBuilder.Entity("Greenhouse.Storage.Entities.SlotTopologyEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Capability")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("EdgeUnitId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("I2cAddress")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ObservedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("SlotId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EdgeUnitId", "SlotId")
+                        .IsUnique();
+
+                    b.ToTable("SlotTopologies", (string)null);
+                });
+
             modelBuilder.Entity("Greenhouse.Storage.Entities.WifiCredentialsEntity", b =>
                 {
                     b.Property<int>("Id")
@@ -69,6 +184,22 @@ namespace Greenhouse.Storage.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("WifiCredentials", (string)null);
+                });
+
+            modelBuilder.Entity("Greenhouse.Storage.Entities.SlotTopologyEntity", b =>
+                {
+                    b.HasOne("Greenhouse.Storage.Entities.EdgeUnitEntity", "EdgeUnit")
+                        .WithMany("Slots")
+                        .HasForeignKey("EdgeUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("EdgeUnit");
+                });
+
+            modelBuilder.Entity("Greenhouse.Storage.Entities.EdgeUnitEntity", b =>
+                {
+                    b.Navigation("Slots");
                 });
 #pragma warning restore 612, 618
         }

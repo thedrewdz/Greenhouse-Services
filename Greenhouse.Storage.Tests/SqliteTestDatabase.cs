@@ -12,24 +12,27 @@ namespace Greenhouse.Storage.Tests;
 public sealed class SqliteTestDatabase : IDisposable
 {
     private readonly SqliteConnection _connection;
+    private readonly DbContextOptions<GreenhouseDbContext> _options;
 
     public SqliteTestDatabase()
     {
         _connection = new SqliteConnection("DataSource=:memory:");
         _connection.Open();
 
-        using var context = CreateContext();
-        context.Database.Migrate();
-    }
-
-    public GreenhouseDbContext CreateContext()
-    {
-        var options = new DbContextOptionsBuilder<GreenhouseDbContext>()
+        _options = new DbContextOptionsBuilder<GreenhouseDbContext>()
             .UseSqlite(_connection)
             .Options;
 
-        return new GreenhouseDbContext(options);
+        using var context = CreateContext();
+        context.Database.Migrate();
+
+        Database = new GreenhouseDatabase(_options);
     }
+
+    /// <summary>The seam repositories take, wired to this fixture's database.</summary>
+    public GreenhouseDatabase Database { get; }
+
+    public GreenhouseDbContext CreateContext() => new(_options);
 
     public long CountRows(string table)
     {
@@ -38,5 +41,9 @@ public sealed class SqliteTestDatabase : IDisposable
         return (long)command.ExecuteScalar()!;
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        Database.Dispose();
+        _connection.Dispose();
+    }
 }

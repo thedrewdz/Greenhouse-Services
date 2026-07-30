@@ -58,6 +58,66 @@ public sealed class NmcliNetworkAdapter : INetworkConnector
         return null;
     }
 
+    public async Task<string?> GetLocalAddressAsync(CancellationToken cancellationToken = default)
+    {
+        // Terse output is one "IP4.ADDRESS[n]:<addr>/<prefix>" line per configured address,
+        // grouped per device. Devices with no IPv4 lease simply contribute no lines.
+        var result = await _runner.RunAsync(
+            new[] { "-t", "-f", "IP4.ADDRESS", "device", "show" },
+            cancellationToken);
+
+        using var reader = new StringReader(result.StandardOutput);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var separator = line.IndexOf(':');
+            if (separator < 0)
+            {
+                continue;
+            }
+
+            var value = line[(separator + 1)..].Trim();
+
+            // Strip the CIDR suffix; nmcli reports "192.168.1.50/24".
+            var slash = value.IndexOf('/');
+            if (slash >= 0)
+            {
+                value = value[..slash];
+            }
+
+            if (IsRoutableIpv4(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Accepts only dotted-quad IPv4 addresses an Edge Unit could actually reach the broker on:
+    /// loopback (127.x) and link-local (169.254.x) are rejected.
+    /// </summary>
+    private static bool IsRoutableIpv4(string value)
+    {
+        var octets = value.Split('.');
+        if (octets.Length != 4)
+        {
+            return false;
+        }
+
+        foreach (var octet in octets)
+        {
+            if (!byte.TryParse(octet, out _))
+            {
+                return false;
+            }
+        }
+
+        return !value.StartsWith("127.", StringComparison.Ordinal)
+               && !value.StartsWith("169.254.", StringComparison.Ordinal);
+    }
+
     public async Task<ConnectResult> ConnectAsync(
         string networkName,
         string? password,

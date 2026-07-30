@@ -59,6 +59,20 @@ public class NmcliLocalAddressTests
         Assert.Equal("192.168.4.94", await adapter.GetLocalAddressAsync());
     }
 
+    [Theory]
+    [InlineData("0.0.0.0")]
+    [InlineData("192. 168.1.5")]
+    [InlineData("192.168.1.+5")]
+    [InlineData("10.1")]
+    [InlineData("::1")]
+    [InlineData("192.168.1.256")]
+    public async Task Rejects_addresses_an_Edge_Unit_could_never_reach_the_broker_on(string address)
+    {
+        var adapter = Create($"IP4.ADDRESS[1]:{address}/24\n");
+
+        Assert.Null(await adapter.GetLocalAddressAsync());
+    }
+
     [Fact]
     public async Task Queries_nmcli_for_device_ipv4_addresses()
     {

@@ -43,32 +43,38 @@ public sealed class EdgeUnitRepository : IEdgeUnitRepository
             },
             cancellationToken);
 
-    public Task UpsertAsync(EdgeUnit edgeUnit, CancellationToken cancellationToken = default) =>
+    /// <remarks>
+    /// The load, the reconciliation, and the write all happen inside one
+    /// <see cref="GreenhouseDatabase.ExecuteAsync{T}"/> call, so nothing can interleave between
+    /// reading the unit and writing the result — in particular not a mapping update, which would
+    /// otherwise be reverted by a heartbeat that read the row before it landed.
+    /// </remarks>
+    public Task<HeartbeatOutcome> RecordHeartbeatAsync(
+        HeartbeatMessage heartbeat,
+        DateTime receivedAt,
+        CancellationToken cancellationToken = default) =>
         _database.ExecuteAsync(
             async (context, ct) =>
             {
                 var entity = await context.EdgeUnits
                     .Include(e => e.Slots)
-                    .FirstOrDefaultAsync(e => e.DeviceId == edgeUnit.DeviceId, ct);
+                    .FirstOrDefaultAsync(e => e.DeviceId == heartbeat.DeviceId, ct);
+
+                var outcome = HeartbeatReconciliation.Reconcile(
+                    entity is null ? null : MapToModel(entity),
+                    heartbeat,
+                    receivedAt);
 
                 if (entity is null)
                 {
-                    entity = new EdgeUnitEntity { DeviceId = edgeUnit.DeviceId };
+                    entity = new EdgeUnitEntity { DeviceId = outcome.Unit.DeviceId };
                     context.EdgeUnits.Add(entity);
                 }
 
-                entity.AdvertisedName = edgeUnit.AdvertisedName;
-                entity.UnitName = edgeUnit.UnitName;
-                entity.Location = edgeUnit.Location;
-                entity.MappingVersion = edgeUnit.MappingVersion;
-                entity.MappingStatus = edgeUnit.MappingStatus;
-                entity.FirstSeenAt = edgeUnit.FirstSeenAt;
-                entity.LastHeartbeatAt = edgeUnit.LastHeartbeatAt;
-                entity.TopologyDriftDetectedAt = edgeUnit.TopologyDriftDetectedAt;
-
-                ReplaceSlots(context, entity, edgeUnit.Slots);
+                Apply(context, entity, outcome.Unit);
 
                 await context.SaveChangesAsync(ct);
+                return outcome;
             },
             cancellationToken);
 
@@ -137,6 +143,21 @@ public sealed class EdgeUnitRepository : IEdgeUnitRepository
 
     private static IQueryable<EdgeUnitEntity> QueryWithSlots(GreenhouseDbContext context) =>
         context.EdgeUnits.AsNoTracking().Include(e => e.Slots);
+
+    /// <summary>Writes <paramref name="unit"/> onto <paramref name="entity"/>, topology included.</summary>
+    private static void Apply(GreenhouseDbContext context, EdgeUnitEntity entity, EdgeUnit unit)
+    {
+        entity.AdvertisedName = unit.AdvertisedName;
+        entity.UnitName = unit.UnitName;
+        entity.Location = unit.Location;
+        entity.MappingVersion = unit.MappingVersion;
+        entity.MappingStatus = unit.MappingStatus;
+        entity.FirstSeenAt = unit.FirstSeenAt;
+        entity.LastHeartbeatAt = unit.LastHeartbeatAt;
+        entity.TopologyDriftDetectedAt = unit.TopologyDriftDetectedAt;
+
+        ReplaceSlots(context, entity, unit.Slots);
+    }
 
     /// <summary>
     /// Replaces the stored topology with <paramref name="slots"/>, keeping rows whose slot id is

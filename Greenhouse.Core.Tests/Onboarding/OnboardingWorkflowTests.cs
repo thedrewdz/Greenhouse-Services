@@ -379,6 +379,55 @@ public class OnboardingWorkflowTests
     }
 
     [Fact]
+    public async Task A_cancelled_session_is_not_resurrected_by_a_late_transport_failure()
+    {
+        await using var harness = new Harness();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Transport.Candidates.Add(Candidate());
+        harness.Transport.HoldProvision = release.Task;
+        harness.Transport.ProvisionThrows = new InvalidOperationException("GATT teardown failed");
+
+        await harness.Workflow.StartOnboardingScanAsync();
+        await harness.WaitForStatusAsync(OnboardingStatuses.CandidatesReady);
+        await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+        await harness.Transport.ProvisionStarted.Task;
+
+        await harness.Workflow.CancelOnboardingAsync(DeviceId);
+        Assert.Equal(OnboardingStatuses.Idle, (await harness.Workflow.GetStateAsync()).Status);
+
+        // The transport now fails with something other than a cancellation. The operator
+        // deliberately abandoned this session; it must not come back as 'failed'.
+        release.SetResult();
+
+        for (var i = 0; i < 20; i++)
+        {
+            await Task.Delay(10);
+            Assert.Equal(OnboardingStatuses.Idle, (await harness.Workflow.GetStateAsync()).Status);
+        }
+
+        Assert.DoesNotContain(OnboardingStatuses.Failed, harness.Notifier.Statuses());
+        Assert.Null(harness.Sessions.Current);
+    }
+
+    [Fact]
+    public async Task A_genuine_provisioning_exception_still_fails_the_session()
+    {
+        await using var harness = new Harness();
+        harness.Transport.Candidates.Add(Candidate());
+        harness.Transport.ProvisionThrows = new InvalidOperationException("GATT write failed");
+
+        await harness.Workflow.StartOnboardingScanAsync();
+        await harness.WaitForStatusAsync(OnboardingStatuses.CandidatesReady);
+        await harness.Workflow.SelectAndProvisionEdgeUnitAsync(DeviceId);
+        await harness.WaitForStatusAsync(OnboardingStatuses.Failed);
+
+        var state = await harness.Workflow.GetStateAsync();
+        Assert.Contains("GATT write failed", state.ErrorMessage);
+        // Selected device survives a failure so the operator can retry without reselecting.
+        Assert.Equal(DeviceId, state.SelectedDeviceId);
+    }
+
+    [Fact]
     public async Task Cancelling_a_different_device_leaves_the_active_session_alone()
     {
         await using var harness = new Harness(new OnboardingTimeouts(

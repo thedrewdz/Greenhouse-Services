@@ -21,6 +21,9 @@ internal sealed class BlueZBleTransport : IBleTransport
 {
     private const string Executable = "bluetoothctl";
 
+    /// <summary>How long a scan teardown may take before the subprocess is killed instead.</summary>
+    private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+
     private readonly ILogger<BlueZBleTransport> _logger;
 
     public BlueZBleTransport(ILogger<BlueZBleTransport> logger)
@@ -37,9 +40,12 @@ internal sealed class BlueZBleTransport : IBleTransport
         // so a candidate reaches the operator the moment it advertises instead of after the
         // whole scan window closes.
         using var process = StartProcess();
-        using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        window.CancelAfter(duration);
 
+        // The window is closed by racing each read against a timer, never by cancelling the read
+        // itself: a pending read on a child process pipe does not observe cancellation on Linux,
+        // so a silent bluetoothctl would otherwise park here forever — past the scan duration,
+        // deaf to an explicit cancel, and blocking daemon shutdown.
+        var window = WindowAsync(duration, cancellationToken);
         var accumulator = new ScanAccumulator();
 
         try
@@ -47,18 +53,19 @@ internal sealed class BlueZBleTransport : IBleTransport
             await process.StandardInput.WriteLineAsync("scan on");
             await process.StandardInput.FlushAsync();
 
-            while (!window.IsCancellationRequested)
+            while (true)
             {
-                string? line;
-                try
+                var read = process.StandardOutput.ReadLineAsync();
+
+                if (await Task.WhenAny(read, window) != read)
                 {
-                    line = await process.StandardOutput.ReadLineAsync(window.Token);
-                }
-                catch (OperationCanceledException)
-                {
+                    // Window elapsed or the caller cancelled. The abandoned read completes when
+                    // the finally block below tears the process down and closes the pipe.
+                    Forget(read);
                     break;
                 }
 
+                var line = await read;
                 if (line is null)
                 {
                     break;
@@ -78,20 +85,58 @@ internal sealed class BlueZBleTransport : IBleTransport
         }
     }
 
-    /// <summary>Best-effort graceful shutdown so the adapter is not left scanning.</summary>
-    private async Task StopScanAsync(Process process)
+    /// <summary>
+    /// Completes when <paramref name="duration"/> elapses or <paramref name="cancellationToken"/>
+    /// is cancelled — never faults, so it is safe to race against a read.
+    /// </summary>
+    private static async Task WindowAsync(TimeSpan duration, CancellationToken cancellationToken)
     {
         try
         {
-            if (process.HasExited)
-            {
-                return;
-            }
+            await Task.Delay(duration, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation closes the window exactly as the timer would.
+        }
+    }
 
+    /// <summary>Observes an abandoned task's outcome so it cannot surface as unobserved.</summary>
+    private static void Forget(Task task) =>
+        _ = task.ContinueWith(
+            static t => _ = t.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    /// <summary>
+    /// Best-effort graceful shutdown so the adapter is not left scanning. Bounded as a whole: a
+    /// wedged subprocess can block the stdin write as easily as the exit wait, and the caller
+    /// always follows this with a kill.
+    /// </summary>
+    private async Task StopScanAsync(Process process)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        var graceful = GracefulStopAsync(process);
+        if (await Task.WhenAny(graceful, Task.Delay(GracefulStopTimeout)) != graceful)
+        {
+            Forget(graceful);
+            _logger.LogDebug("bluetoothctl did not shut down within {Timeout}; killing it.", GracefulStopTimeout);
+        }
+    }
+
+    private async Task GracefulStopAsync(Process process)
+    {
+        try
+        {
             await process.StandardInput.WriteLineAsync("scan off");
             await process.StandardInput.WriteLineAsync("quit");
             await process.StandardInput.FlushAsync();
-            await process.WaitForExitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(2)).Token);
+            await process.WaitForExitAsync();
         }
         catch (Exception ex)
         {

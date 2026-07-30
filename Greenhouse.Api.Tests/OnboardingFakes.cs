@@ -56,10 +56,16 @@ internal sealed class FakeEdgeUnitRepository : IEdgeUnitRepository
     public Task<IReadOnlyList<EdgeUnit>> GetAllAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<EdgeUnit>>(Units.Values.OrderBy(u => u.DeviceId).ToArray());
 
-    public Task UpsertAsync(EdgeUnit edgeUnit, CancellationToken cancellationToken = default)
+    public Task<HeartbeatOutcome> RecordHeartbeatAsync(
+        HeartbeatMessage heartbeat,
+        DateTime receivedAt,
+        CancellationToken cancellationToken = default)
     {
-        Units[edgeUnit.DeviceId] = edgeUnit;
-        return Task.CompletedTask;
+        Units.TryGetValue(heartbeat.DeviceId, out var existing);
+
+        var outcome = HeartbeatReconciliation.Reconcile(existing, heartbeat, receivedAt);
+        Units[outcome.Unit.DeviceId] = outcome.Unit;
+        return Task.FromResult(outcome);
     }
 
     public Task<EdgeUnit?> UpdateMappingAsync(

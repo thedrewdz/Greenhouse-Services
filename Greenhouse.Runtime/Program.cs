@@ -33,8 +33,11 @@ builder.Services.AddSwaggerGen();
 // This ensures EF Core's migration executor sees schema changes (e.g. __EFMigrationsHistory)
 // across all commands without relying on SQLite's schema cache being refreshed between
 // connection pool checkouts, which is unreliable on Linux ARM64 with WAL mode.
+// Disposed via the DI container so the connection's lifetime is explicit and tied to the host,
+// rather than relying on process exit to release it.
 var sqliteConnection = new SqliteConnection(builder.Configuration.GetConnectionString("Default"));
 sqliteConnection.Open();
+builder.Services.AddSingleton(sqliteConnection);
 var dbOptions = new DbContextOptionsBuilder<GreenhouseDbContext>()
     .UseSqlite(sqliteConnection)
     .Options;

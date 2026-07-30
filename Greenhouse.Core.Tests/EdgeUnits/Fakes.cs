@@ -33,10 +33,20 @@ internal sealed class FakeEdgeUnitRepository : IEdgeUnitRepository
     public Task<IReadOnlyList<EdgeUnit>> GetAllAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<EdgeUnit>>(Units.Values.OrderBy(u => u.DeviceId).ToArray());
 
-    public Task UpsertAsync(EdgeUnit edgeUnit, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Reconciles and stores in one synchronous step, mirroring the real repository's contract that
+    /// nothing interleaves between the read and the write.
+    /// </summary>
+    public Task<HeartbeatOutcome> RecordHeartbeatAsync(
+        HeartbeatMessage heartbeat,
+        DateTime receivedAt,
+        CancellationToken cancellationToken = default)
     {
-        Units[edgeUnit.DeviceId] = edgeUnit;
-        return Task.CompletedTask;
+        Units.TryGetValue(heartbeat.DeviceId, out var existing);
+
+        var outcome = HeartbeatReconciliation.Reconcile(existing, heartbeat, receivedAt);
+        Units[outcome.Unit.DeviceId] = outcome.Unit;
+        return Task.FromResult(outcome);
     }
 
     public Task<EdgeUnit?> UpdateMappingAsync(
@@ -261,14 +271,37 @@ internal sealed class FakeProvisioningTransport : IEdgeUnitProvisioningTransport
         }
     }
 
-    public Task<ProvisioningResult> ProvisionUnitAsync(
+    /// <summary>Completes once provisioning has been entered.</summary>
+    public TaskCompletionSource ProvisionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>When set, provisioning blocks on this before returning or throwing.</summary>
+    public Task? HoldProvision { get; set; }
+
+    /// <summary>When set, provisioning throws this instead of returning <see cref="Result"/>.</summary>
+    public Exception? ProvisionThrows { get; set; }
+
+    public async Task<ProvisioningResult> ProvisionUnitAsync(
         ProvisionableUnit unit,
         ProvisioningPayload payload,
         CancellationToken cancellationToken = default)
     {
         LastUnit = unit;
         LastPayload = payload;
-        return Task.FromResult(Result);
+        ProvisionStarted.TrySetResult();
+
+        if (HoldProvision is not null)
+        {
+            // Deliberately not linked to the token: this models a transport that finishes badly
+            // *after* the session was cancelled, which is the case that must not overwrite idle.
+            await HoldProvision;
+        }
+
+        if (ProvisionThrows is not null)
+        {
+            throw ProvisionThrows;
+        }
+
+        return Result;
     }
 }
 

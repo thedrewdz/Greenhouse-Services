@@ -35,11 +35,17 @@ internal sealed class HeartbeatSubscriptionService : IHostedService
         return Task.CompletedTask;
     }
 
+    /// <remarks>
+    /// Unsubscribes before cancelling so no further handler starts, then cancels the ones already
+    /// running. The token source is deliberately not disposed: handlers are dispatched
+    /// fire-and-forget by the messaging service, so there is nothing to await, and disposing it out
+    /// from under an in-flight handler would surface as an <see cref="ObjectDisposedException"/>
+    /// during shutdown. It holds no timer, so leaving it to the GC costs nothing.
+    /// </remarks>
     public Task StopAsync(CancellationToken cancellationToken)
     {
         _messaging.Unsubscribe(EdgeUnitTopics.Heartbeat);
         _lifetime?.Cancel();
-        _lifetime?.Dispose();
         return Task.CompletedTask;
     }
 }

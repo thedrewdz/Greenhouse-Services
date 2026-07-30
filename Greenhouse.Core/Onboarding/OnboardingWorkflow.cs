@@ -139,7 +139,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
 
             // Scanning must begin promptly and continue independently of the request that asked
             // for it: navigating away in the UI must not stop the backend scan.
-            _background = Task.Run(() => RunScanAsync(sessionToken), CancellationToken.None);
+            Track(Task.Run(() => RunScanAsync(sessionToken), CancellationToken.None));
         }
         finally
         {
@@ -195,7 +195,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             await PersistAsync(cancellationToken);
             state = Snapshot();
 
-            _background = Task.Run(() => RunProvisioningAsync(candidate, sessionToken), CancellationToken.None);
+            Track(Task.Run(() => RunProvisioningAsync(candidate, sessionToken), CancellationToken.None));
         }
         finally
         {
@@ -335,7 +335,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         }
         catch (Exception ex)
         {
-            await FailAsync(errorCode: null, $"BLE scan failed: {ex.Message}");
+            await FailAsync(OnboardingStatuses.Scanning, errorCode: null, $"BLE scan failed: {ex.Message}");
         }
     }
 
@@ -380,7 +380,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             if (result is ProvisioningResult.Failed failed)
             {
                 // Keep the selected device so the operator can retry without reselecting.
-                await FailAsync(failed.ErrorCode, failed.ErrorMessage);
+                await FailAsync(OnboardingStatuses.Provisioning, failed.ErrorCode, failed.ErrorMessage);
                 return;
             }
 
@@ -392,7 +392,10 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         }
         catch (Exception ex)
         {
-            await FailAsync(errorCode: null, $"Provisioning failed: {ex.Message}");
+            await FailAsync(
+                OnboardingStatuses.Provisioning,
+                errorCode: null,
+                $"Provisioning failed: {ex.Message}");
         }
     }
 
@@ -409,6 +412,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         if (credentials is null || string.IsNullOrWhiteSpace(credentials.NetworkName))
         {
             await FailAsync(
+                OnboardingStatuses.Provisioning,
                 WifiSsidEmpty,
                 "No WiFi credentials are stored on the Main Unit; complete Main Unit setup first.");
             return null;
@@ -418,6 +422,7 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
         if (localAddress is null)
         {
             await FailAsync(
+                OnboardingStatuses.Provisioning,
                 MqttBrokerUriInvalid,
                 "The Main Unit has no local network address, so the MQTT broker URI cannot be derived.");
             return null;
@@ -472,17 +477,29 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
 
         // Main Unit never auto-retries after this timeout: the operator restarts from the UI.
         await FailAsync(
+            OnboardingStatuses.AwaitingHeartbeat,
             errorCode: null,
             $"No heartbeat was received within {_timeouts.Heartbeat.TotalSeconds:0} seconds of provisioning.");
     }
 
-    private async Task FailAsync(int? errorCode, string errorMessage)
+    /// <summary>
+    /// Fails the session, but only while it is still in <paramref name="expectedStatus"/> — the
+    /// state the failing work owns. A cancel that already moved the session to idle must not be
+    /// overwritten by a transport exception that arrives afterwards, which is otherwise exactly
+    /// what happens when the transport throws something other than a cancellation.
+    /// </summary>
+    private async Task FailAsync(string expectedStatus, int? errorCode, string errorMessage)
     {
         OnboardingState state;
 
         await _mutex.WaitAsync(CancellationToken.None);
         try
         {
+            if (_status != expectedStatus)
+            {
+                return;
+            }
+
             _status = OnboardingStatuses.Failed;
             _errorCode = errorCode;
             _errorMessage = errorMessage;
@@ -505,9 +522,11 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
             return;
         }
 
+        // Set only after a successful read: a failed load must be retried, not silently latched
+        // into reporting idle for the rest of the process lifetime.
+        var session = await _sessions.GetCurrentAsync(cancellationToken);
         _loaded = true;
 
-        var session = await _sessions.GetCurrentAsync(cancellationToken);
         if (session is null)
         {
             return;
@@ -544,6 +563,13 @@ public sealed class OnboardingWorkflow : IOnboardingWorkflow, IAsyncDisposable, 
 
         await _sessions.ClearAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// Adds <paramref name="task"/> to the background work dispose waits on, keeping any
+    /// predecessor that has not finished unwinding yet. Callers must hold the mutex.
+    /// </summary>
+    private void Track(Task task) =>
+        _background = _background.IsCompleted ? task : Task.WhenAll(_background, task);
 
     /// <summary>Callers must hold the mutex.</summary>
     private Task PersistAsync(CancellationToken cancellationToken)

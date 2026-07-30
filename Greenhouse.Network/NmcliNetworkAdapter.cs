@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using Greenhouse.Core.Networking;
 using Microsoft.Extensions.Logging;
 
@@ -96,26 +98,30 @@ public sealed class NmcliNetworkAdapter : INetworkConnector
 
     /// <summary>
     /// Accepts only dotted-quad IPv4 addresses an Edge Unit could actually reach the broker on:
-    /// loopback (127.x) and link-local (169.254.x) are rejected.
+    /// loopback, link-local, and the unspecified address are rejected.
     /// </summary>
+    /// <remarks>
+    /// Parsed with <see cref="IPAddress.TryParse"/> rather than by splitting on '.': that also
+    /// rejects the near-misses a hand-rolled check lets through, such as embedded whitespace or a
+    /// signed octet, either of which would be handed to an Edge Unit as a broker host.
+    /// </remarks>
     private static bool IsRoutableIpv4(string value)
     {
-        var octets = value.Split('.');
-        if (octets.Length != 4)
+        if (!IPAddress.TryParse(value, out var address)
+            || address.AddressFamily != AddressFamily.InterNetwork
+            // TryParse accepts shorthand forms like "10.1" that nmcli never emits; require the
+            // dotted quad so the value round-trips to exactly what was reported.
+            || address.ToString() != value)
         {
             return false;
         }
 
-        foreach (var octet in octets)
-        {
-            if (!byte.TryParse(octet, out _))
-            {
-                return false;
-            }
-        }
+        var octets = address.GetAddressBytes();
 
-        return !value.StartsWith("127.", StringComparison.Ordinal)
-               && !value.StartsWith("169.254.", StringComparison.Ordinal);
+        return !IPAddress.IsLoopback(address)
+               && !address.Equals(IPAddress.Any)
+               // Link-local: 169.254.0.0/16.
+               && !(octets[0] == 169 && octets[1] == 254);
     }
 
     public async Task<ConnectResult> ConnectAsync(

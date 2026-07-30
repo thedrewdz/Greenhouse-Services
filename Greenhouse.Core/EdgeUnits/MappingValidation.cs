@@ -2,9 +2,10 @@ namespace Greenhouse.Core.EdgeUnits;
 
 /// <summary>
 /// Single source of the runtime mapping rules from
-/// <c>specs/edge-unit-configuration/spec.md</c> ("Main Unit Input Validation"). Shared by the
-/// API boundary, which turns the result into a field-level error envelope, and the
-/// <see cref="UpdateEdgeUnitMapping"/> use case, which uses it as a backstop.
+/// <c>specs/edge-unit-configuration/spec.md</c> ("Main Unit Input Validation"). Called by the
+/// <see cref="UpdateEdgeUnitMapping"/> use case, which is the only validation layer — the API
+/// boundary just turns the returned errors into a field-level error envelope and does not
+/// re-check anything itself.
 /// </summary>
 /// <remarks>
 /// Validation is against the unit's stored topology, not just the request: every discovered

@@ -13,11 +13,20 @@ public interface IEdgeUnitRepository
     Task<IReadOnlyList<EdgeUnit>> GetAllAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Inserts or replaces <paramref name="edgeUnit"/> together with its slot topology. Used by
-    /// heartbeat processing to register a new unit and to refresh observed topology; the write
-    /// is atomic, so a partially applied topology is never observable.
+    /// Applies <paramref name="heartbeat"/> to stored state and returns what it meant: registering
+    /// a previously unknown unit, refreshing liveness, or raising the Drift Flag. Returns the
+    /// reconciled unit so callers never need to read it back.
     /// </summary>
-    Task UpsertAsync(EdgeUnit edgeUnit, CancellationToken cancellationToken = default);
+    /// <remarks>
+    /// The read, the decision (<see cref="HeartbeatReconciliation.Reconcile"/>), and the write are
+    /// one atomic operation by contract. Heartbeat ingestion runs concurrently with the mapping
+    /// endpoint, so deciding against a separately-read snapshot would let a heartbeat revert a
+    /// mapping accepted in between — there is deliberately no whole-unit write on this port.
+    /// </remarks>
+    Task<HeartbeatOutcome> RecordHeartbeatAsync(
+        HeartbeatMessage heartbeat,
+        DateTime receivedAt,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Applies <paramref name="mapping"/> atomically: increments <c>MappingVersion</c> by one,

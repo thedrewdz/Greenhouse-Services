@@ -40,7 +40,12 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
     private readonly ConcurrentDictionary<string, PendingAcknowledgement> _pending =
         new(StringComparer.OrdinalIgnoreCase);
 
-    private int _lastMessageId = 1000;
+    /// <summary>
+    /// Seeded from the clock rather than a constant so message ids do not repeat across restarts.
+    /// Correlation is <c>(message_id, mapping_version)</c>, and a fixed seed would let a retained
+    /// or late ack from a previous process satisfy a fresh attempt's wait.
+    /// </summary>
+    private int _lastMessageId;
 
     public EdgeUnitConfigurationPublisher(
         IMessagingService messaging,
@@ -56,6 +61,9 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
         _policy = policy;
         _timeProvider = timeProvider;
         _logger = logger;
+
+        // Keep it comfortably inside int range and monotonic within a process.
+        _lastMessageId = (int)(timeProvider.GetUtcNow().ToUnixTimeSeconds() % 1_000_000) * 1_000;
     }
 
     public void RequestPublish(string deviceId, string mappingReason) =>
@@ -149,70 +157,18 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
 
         for (var attempt = 1; attempt <= _policy.MaxAttempts; attempt++)
         {
-            // Retries reuse the same message_id and mapping_version so the Edge Unit can
-            // recognise the resend rather than treating it as a new update.
-            var pending = new PendingAcknowledgement(messageId, unit.MappingVersion);
-            _pending[unit.DeviceId] = pending;
+            var outcome = await AttemptAsync(unit, payload, messageId, attempt, cancellationToken);
 
-            try
+            if (outcome is AttemptOutcome.Acknowledged)
             {
-                _logger.LogDebug(
-                    "Publishing configuration to '{DeviceId}' (message_id={MessageId}, mapping_version={MappingVersion}, attempt {Attempt}/{MaxAttempts}).",
-                    unit.DeviceId,
-                    messageId,
-                    unit.MappingVersion,
-                    attempt,
-                    _policy.MaxAttempts);
-
-                await _messaging.PublishAsync(
-                    EdgeUnitTopics.ConfigurationWrite(unit.DeviceId),
-                    payload,
-                    cancellationToken);
-
-                if (attempt == 1)
-                {
-                    await _edgeUnits.UpdateMappingStatusAsync(
-                        unit.DeviceId,
-                        MappingStatuses.Published,
-                        clearTopologyDrift: false,
-                        cancellationToken);
-                }
-
-                var ack = await WaitForAcknowledgementAsync(pending, cancellationToken);
-                if (ack is null)
-                {
-                    _logger.LogWarning(
-                        "Configuration ack timed out for '{DeviceId}' (message_id={MessageId}, mapping_version={MappingVersion}, attempt {Attempt}/{MaxAttempts}).",
-                        unit.DeviceId,
-                        messageId,
-                        unit.MappingVersion,
-                        attempt,
-                        _policy.MaxAttempts);
-                }
-                else if (IsSuccess(ack))
-                {
-                    await AcceptAsync(unit.DeviceId, cancellationToken);
-                    return;
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "Edge Unit '{DeviceId}' rejected configuration (message_id={MessageId}, mapping_version={MappingVersion}, error_code={ErrorCode}).",
-                        unit.DeviceId,
-                        messageId,
-                        unit.MappingVersion,
-                        ack.ErrorCode);
-
-                    if (!ConfigurationErrorCodes.IsRetryable(ack.ErrorCode))
-                    {
-                        await FailAsync(unit.DeviceId, cancellationToken);
-                        return;
-                    }
-                }
+                await AcceptAsync(unit.DeviceId, cancellationToken);
+                return;
             }
-            finally
+
+            if (outcome is AttemptOutcome.Rejected)
             {
-                _pending.TryRemove(new KeyValuePair<string, PendingAcknowledgement>(unit.DeviceId, pending));
+                await FailAsync(unit.DeviceId, cancellationToken);
+                return;
             }
 
             if (attempt < _policy.MaxAttempts)
@@ -222,6 +178,113 @@ public sealed class EdgeUnitConfigurationPublisher : IEdgeUnitConfigurationPubli
         }
 
         await FailAsync(unit.DeviceId, cancellationToken);
+    }
+
+    /// <summary>
+    /// One publish-and-await-ack attempt. Every failure mode that another attempt could plausibly
+    /// fix — a transport error, an ack timeout, a retryable rejection — returns
+    /// <see cref="AttemptOutcome.Retry"/> rather than throwing, so a single request can never
+    /// escape the retry budget and leave the unit stranded at <c>publish-pending</c>.
+    /// </summary>
+    private async Task<AttemptOutcome> AttemptAsync(
+        EdgeUnit unit,
+        string payload,
+        int messageId,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        // Retries reuse the same message_id and mapping_version so the Edge Unit can
+        // recognise the resend rather than treating it as a new update.
+        var pending = new PendingAcknowledgement(messageId, unit.MappingVersion);
+        _pending[unit.DeviceId] = pending;
+
+        try
+        {
+            _logger.LogDebug(
+                "Publishing configuration to '{DeviceId}' (message_id={MessageId}, mapping_version={MappingVersion}, attempt {Attempt}/{MaxAttempts}).",
+                unit.DeviceId,
+                messageId,
+                unit.MappingVersion,
+                attempt,
+                _policy.MaxAttempts);
+
+            try
+            {
+                await _messaging.PublishAsync(
+                    EdgeUnitTopics.ConfigurationWrite(unit.DeviceId),
+                    payload,
+                    cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A transport failure — an offline broker, most likely — spends an attempt like
+                // any other, and honours the backoff before the next one.
+                _logger.LogWarning(
+                    "Configuration publish to '{DeviceId}' failed on attempt {Attempt}/{MaxAttempts}: {Reason}",
+                    unit.DeviceId,
+                    attempt,
+                    _policy.MaxAttempts,
+                    ex.Message);
+
+                return AttemptOutcome.Retry;
+            }
+
+            if (attempt == 1)
+            {
+                await _edgeUnits.UpdateMappingStatusAsync(
+                    unit.DeviceId,
+                    MappingStatuses.Published,
+                    clearTopologyDrift: false,
+                    cancellationToken);
+            }
+
+            var ack = await WaitForAcknowledgementAsync(pending, cancellationToken);
+            if (ack is null)
+            {
+                _logger.LogWarning(
+                    "Configuration ack timed out for '{DeviceId}' (message_id={MessageId}, mapping_version={MappingVersion}, attempt {Attempt}/{MaxAttempts}).",
+                    unit.DeviceId,
+                    messageId,
+                    unit.MappingVersion,
+                    attempt,
+                    _policy.MaxAttempts);
+
+                return AttemptOutcome.Retry;
+            }
+
+            if (IsSuccess(ack))
+            {
+                return AttemptOutcome.Acknowledged;
+            }
+
+            _logger.LogWarning(
+                "Edge Unit '{DeviceId}' rejected configuration (message_id={MessageId}, mapping_version={MappingVersion}, error_code={ErrorCode}).",
+                unit.DeviceId,
+                messageId,
+                unit.MappingVersion,
+                ack.ErrorCode);
+
+            return ConfigurationErrorCodes.IsRetryable(ack.ErrorCode)
+                ? AttemptOutcome.Retry
+                : AttemptOutcome.Rejected;
+        }
+        finally
+        {
+            _pending.TryRemove(new KeyValuePair<string, PendingAcknowledgement>(unit.DeviceId, pending));
+        }
+    }
+
+    /// <summary>What one publish attempt concluded.</summary>
+    private enum AttemptOutcome
+    {
+        /// <summary>The unit applied the mapping.</summary>
+        Acknowledged,
+
+        /// <summary>Another attempt may help, budget permitting.</summary>
+        Retry,
+
+        /// <summary>The unit refused in a way a resend cannot fix; stop now.</summary>
+        Rejected,
     }
 
     private async Task<AcknowledgementDto?> WaitForAcknowledgementAsync(

@@ -188,6 +188,35 @@ public class ProcessHeartbeatTests
         Assert.Equal(2, unit.Slots.Count);
     }
 
+    [Fact]
+    public async Task A_liveness_heartbeat_never_touches_the_mapping()
+    {
+        var mapped = Mapped(slots: (0, "0x25"));
+        var (handler, units, _) = Create(mapped);
+
+        await handler.HandleAsync(Envelope(Heartbeat((0, "0x25"))));
+
+        var unit = units.Units[DeviceId];
+        Assert.Equal(mapped.MappingVersion, unit.MappingVersion);
+        Assert.Equal(mapped.MappingStatus, unit.MappingStatus);
+        Assert.Equal(mapped.UnitName, unit.UnitName);
+        Assert.Equal(mapped.Location, unit.Location);
+        Assert.Equal(mapped.Slots[0].Role, unit.Slots[0].Role);
+        Assert.Equal(mapped.Slots[0].Label, unit.Slots[0].Label);
+    }
+
+    [Fact]
+    public async Task A_repeated_slot_id_is_treated_as_drift_rather_than_a_match()
+    {
+        // Same slot count as the stored topology, but only one distinct slot: a firmware bug
+        // must not read as "topology unchanged".
+        var (handler, units, _) = Create(Mapped(slots: new[] { (0, "0x25"), (4, "0x51") }));
+
+        await handler.HandleAsync(Envelope(Heartbeat((0, "0x25"), (0, "0x25"))));
+
+        Assert.True(units.Units[DeviceId].HasTopologyDrift);
+    }
+
     [Theory]
     [InlineData("not json")]
     [InlineData("{}")]

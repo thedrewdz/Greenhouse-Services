@@ -311,6 +311,68 @@ public class EdgeUnitConfigurationPublisherTests
     }
 
     [Fact]
+    public async Task A_publish_that_throws_spends_an_attempt_and_still_reaches_a_terminal_status()
+    {
+        await using var harness = new Harness();
+        // An offline broker: MQTTnet throws rather than queueing.
+        harness.Messaging.OnPublish = (_, _) => throw new InvalidOperationException("not connected");
+
+        harness.Publisher.RequestPublish(DeviceId, MappingReasons.InitialRegistration);
+        await harness.WaitForStatusAsync(MappingStatuses.Failed);
+
+        // The whole budget is spent, and the unit never strands at publish-pending.
+        Assert.Equal(3, harness.Messaging.Published.Count);
+        Assert.DoesNotContain(harness.Units.StatusUpdates, u => u.Status == MappingStatuses.Acknowledged);
+    }
+
+    [Fact]
+    public async Task A_publish_that_throws_once_then_succeeds_is_acknowledged()
+    {
+        await using var harness = new Harness();
+        var attempt = 0;
+        harness.Messaging.OnPublish = async (_, payload) =>
+        {
+            if (++attempt == 1)
+            {
+                throw new InvalidOperationException("not connected");
+            }
+
+            using var document = JsonDocument.Parse(payload);
+            await harness.Messaging.DeliverAsync(
+                EdgeUnitTopics.ConfigurationAck(DeviceId),
+                SuccessAck(document.RootElement));
+        };
+
+        harness.Publisher.RequestPublish(DeviceId, MappingReasons.InitialRegistration);
+        await harness.WaitForStatusAsync(MappingStatuses.Acknowledged);
+
+        Assert.Equal(2, harness.Messaging.Published.Count);
+    }
+
+    [Fact]
+    public async Task A_failing_publish_does_not_stop_the_pump_for_other_units()
+    {
+        await using var harness = new Harness();
+        harness.Units.Units["2BEEF0000001"] = Mapped() with { DeviceId = "2BEEF0000001" };
+        harness.Messaging.OnPublish = (topic, _) => topic.EndsWith(DeviceId, StringComparison.Ordinal)
+            ? throw new InvalidOperationException("not connected")
+            : Task.CompletedTask;
+
+        harness.Publisher.RequestPublish(DeviceId, MappingReasons.InitialRegistration);
+        harness.Publisher.RequestPublish("2BEEF0000001", MappingReasons.InitialRegistration);
+
+        await harness.WaitForStatusAsync(MappingStatuses.Failed);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline
+               && !harness.Messaging.Published.Any(m => m.Topic.EndsWith("2BEEF0000001", StringComparison.Ordinal)))
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Contains(harness.Messaging.Published, m => m.Topic == "ghcfg/wr-2BEEF0000001");
+    }
+
+    [Fact]
     public async Task An_unknown_device_publishes_nothing()
     {
         await using var harness = new Harness();

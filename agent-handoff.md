@@ -79,11 +79,56 @@ Epic #25 — Edge Unit Onboarding and Configuration:
 - Storage skill (`dotnet-storage-and-persistence.md`) says "WiFi credentials are not stored in
   the app database" — still contradicts the spec's `WifiCredentials` table.
 
+## Code Review of PR #45 — findings filed and fixed on the branch
+
+Reviewed the full PR #45 diff. Five issues filed (#46–#50) and all fixed on this branch; suite now
+**251 passed, 0 failed** (was 235). Also commented on #41: its "does not affect the merged
+scaffolding" assessment no longer holds, because the streaming scan holds the undrained-stderr
+subprocess open for the whole scan window.
+
+- **#46 (blocking) — heartbeat ingestion could erase an accepted mapping.** `ProcessHeartbeat` read
+  the unit in one database operation and wrote the whole row in another, so a mapping `PUT` landing
+  in between was reverted — silently, on the onboarding hot path. Fixed by moving the decision into
+  a pure `HeartbeatReconciliation.Reconcile` and adding `IEdgeUnitRepository.RecordHeartbeatAsync`,
+  which reads, reconciles, and writes inside one `GreenhouseDatabase.ExecuteAsync`. `UpsertAsync`
+  was **removed from the port** — a whole-unit write is what made the bug reachable, so heartbeat
+  ingestion is now structurally incapable of touching mapping columns.
+- **#47 (blocking) — BLE scan could park past its window.** The window was bounded only by
+  cancelling `ReadLineAsync`, which a pipe read does not honour on Linux, so a silent
+  `bluetoothctl` hung the session in `scanning`, ignored cancel, and blocked shutdown. Each read is
+  now raced against a window task; teardown is bounded and then kills the subprocess. This also
+  mitigates #41's deadlock, because the window closes regardless of whether the child is wedged.
+- **#48 (blocking, part 1) — a publish throw stranded the mapping at `publish-pending`.** An
+  offline broker made `PublishAsync` throw straight past the retry budget into the pump's
+  catch-all: no retry, no terminal status. Attempts are now a single `AttemptAsync` returning
+  `Acknowledged | Retry | Rejected`, so a transport failure spends an attempt, honours the backoff,
+  and ends at `failed`. **Part 2 (re-publish pending mappings on broker reconnect) is still open on
+  #48** — it needs a reconnect hook `IMessagingService` does not expose yet.
+- **#49 — `FailAsync` could resurrect a cancelled session.** It now takes the status the failing
+  work owns and returns early if the session has moved on.
+- **#50 — hardening cluster (8 items), all applied**: `_loaded` set only after a successful load;
+  `IsRoutableIpv4` uses `IPAddress.TryParse` and rejects `0.0.0.0`/whitespace/signed octets;
+  `MappingValidation` doc comment corrected (the use case is the only validation layer);
+  `_lastMessageId` seeded from the clock; duplicate reported `slot_id`s now count as drift;
+  `HeartbeatSubscriptionService` no longer disposes its CTS out from under in-flight handlers;
+  `_background` tracks unfinished predecessors via `Track`; the `SqliteConnection` is registered
+  for container disposal.
+
+Re-verified: `dotnet build` clean, 251 tests pass, and the daemon still starts with no UI present,
+migrates on first run, serves `GET /api/onboarding` and `GET /api/edge-units` with the documented
+shapes, and publishes all seven new paths in OpenAPI.
+
+**#47 is not covered by automated tests** — it needs `bluetoothctl`, so it is verified by
+construction and belongs to the on-device work below.
+
 ## Next Actions
 
 - On-device verification on the test Pi: BLE scan/provision against a real Edge Unit, and the
   `ghcfg/wr-` → `ghcfg/ack-` round trip against Mosquitto. Neither path can be exercised on a
-  development host; unit coverage substitutes fakes at the transport seam.
+  development host; unit coverage substitutes fakes at the transport seam. The #47 scan-window fix
+  and #41's stderr drain both need this pass.
+- **#48 part 2** — re-publish `publish-pending`/`failed` mappings after a broker reconnect.
+- **#41** — drain stderr in `StartProcess` so both the session and streaming scan paths are safe.
 - UI epic (Main Unit Setup — UI, Greenhouse-WebUI) is unblocked by this work.
 
 ## Resume Prompt

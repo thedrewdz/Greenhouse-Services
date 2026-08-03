@@ -21,14 +21,30 @@ internal sealed class BlueZBleTransport : IBleTransport
 {
     private const string Executable = "bluetoothctl";
 
+    /// <summary>Longest stderr excerpt carried in a <see cref="BleTransportException"/> message.</summary>
+    private const int StderrExcerptLength = 500;
+
     /// <summary>How long a scan teardown may take before the subprocess is killed instead.</summary>
     private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
 
     private readonly ILogger<BlueZBleTransport> _logger;
+    private readonly string _executable;
+    private readonly string _arguments;
 
     public BlueZBleTransport(ILogger<BlueZBleTransport> logger)
+        : this(logger, Executable, string.Empty)
+    {
+    }
+
+    /// <summary>
+    /// Test seam: substitutes a stand-in for <c>bluetoothctl</c> so subprocess handling — pipe
+    /// draining and exit-code reporting — can be exercised on a host without BlueZ.
+    /// </summary>
+    internal BlueZBleTransport(ILogger<BlueZBleTransport> logger, string executable, string arguments)
     {
         _logger = logger;
+        _executable = executable;
+        _arguments = arguments;
     }
 
     public async IAsyncEnumerable<BleDeviceInfo> ScanAsync(
@@ -40,6 +56,12 @@ internal sealed class BlueZBleTransport : IBleTransport
         // so a candidate reaches the operator the moment it advertises instead of after the
         // whole scan window closes.
         using var process = StartProcess();
+
+        // stderr is redirected but nothing below consumes it, so drain it in the background: a
+        // chatty bluetoothctl would otherwise fill the stderr pipe buffer, block on the write, and
+        // stop producing the stdout lines this scan is reading. The read ends when teardown closes
+        // the pipe; its content is of no use here, only the draining is.
+        Forget(process.StandardError.ReadToEndAsync());
 
         // The window is closed by racing each read against a timer, never by cancelling the read
         // itself: a pending read on a child process pipe does not observe cancellation on Linux,
@@ -330,13 +352,14 @@ internal sealed class BlueZBleTransport : IBleTransport
         return bytes.ToArray();
     }
 
-    private static Process StartProcess()
+    private Process StartProcess()
     {
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = Executable,
+                FileName = _executable,
+                Arguments = _arguments,
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -358,24 +381,64 @@ internal sealed class BlueZBleTransport : IBleTransport
         return process;
     }
 
+    /// <summary>
+    /// Runs one <c>bluetoothctl</c> session and returns its stdout transcript.
+    /// </summary>
+    /// <remarks>
+    /// Both pipes are drained concurrently, and draining stderr is not optional: it is redirected,
+    /// so a session that writes more than the OS pipe buffer holds would block on the write and
+    /// never reach exit. Both reads start before <paramref name="drive"/> so neither stream can
+    /// back up while the session is being driven.
+    /// </remarks>
     private async Task<string> RunSessionAsync(
         Func<StreamWriter, CancellationToken, Task> drive,
         CancellationToken cancellationToken)
     {
         using var process = StartProcess();
 
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
         try
         {
-            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             await drive(process.StandardInput, cancellationToken);
             await process.WaitForExitAsync(cancellationToken);
-            return await outputTask;
         }
         catch (OperationCanceledException)
         {
+            // Killing the process closes both pipes, which completes the abandoned reads.
             StopProcess(process);
+            Forget(outputTask);
+            Forget(errorTask);
             throw;
         }
+
+        var output = await outputTask;
+        var error = await errorTask;
+
+        if (process.ExitCode != 0)
+        {
+            // stderr is the only diagnosis available for an on-device session that never ran.
+            throw new BleTransportException(
+                $"bluetoothctl exited with code {process.ExitCode}: {Excerpt(error)}");
+        }
+
+        return output;
+    }
+
+    /// <summary>Condenses subprocess stderr into a single bounded line for an exception message.</summary>
+    internal static string Excerpt(string error)
+    {
+        var text = string.Join(
+            ' ',
+            error.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+        return text.Length switch
+        {
+            0 => "(no stderr output)",
+            <= StderrExcerptLength => text,
+            _ => text[..StderrExcerptLength] + "...",
+        };
     }
 
     private static void StopProcess(Process process)

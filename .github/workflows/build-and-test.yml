@@ -1,0 +1,45 @@
+name: build-and-test
+
+# The merge gate for this repository. Merge Approval in the delivery harness requires the
+# required checks on a pull request's head commit to be green, so this workflow is what makes
+# a Greenhouse-Services pull request approvable at all.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Matches the TargetFramework every project in the solution builds against.
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore Greenhouse.slnx
+
+      - name: Build
+        # Warnings are already errors for package downgrades (NU1605); keep the build strict
+        # rather than letting a warning-only regression through the gate.
+        run: dotnet build Greenhouse.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Greenhouse.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        # Runs even on failure — a red gate is when the results matter most.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: warn

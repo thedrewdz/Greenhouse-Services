@@ -90,6 +90,11 @@ Before finalizing changes, verify:
    - `dotnet restore`
    - `dotnet build --no-restore`
    - `dotnet test --no-build --no-restore`
+
+   These are **enforced by CI, not only by convention**: `.github/workflows/build-and-test.yml` runs
+   them on every pull request targeting `main`, and its check is the required check this repository
+   contributes to the harness's Merge Approval condition. Running them locally first is still
+   expected — CI is the gate, not the feedback loop.
 4. Confirm tests for changed behavior exist and pass.
 5. Update `agent-handoff.md` with factual current-session state.
 6. Propose durable guidance changes in the documentation repository, not here.

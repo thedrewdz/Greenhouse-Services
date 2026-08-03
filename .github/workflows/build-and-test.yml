@@ -10,10 +10,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The gate only ever needs to read the tree it was handed.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for a pull request when it is pushed again, but never cancel a
+# run on main — that one is the record for a merged commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-test:
     name: build-and-test
     runs-on: ubuntu-latest
+    # Generous against a ~1 minute run; bounds a hung suite instead of holding a runner for 6h.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -21,16 +33,24 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          # Matches the TargetFramework every project in the solution builds against.
-          dotnet-version: '8.0.x'
+          # Two SDKs, for two different reasons — do not reduce this to one:
+          #   10.0.x — the CLI only understands the .slnx solution format from SDK 9.0.200 on.
+          #            An 8.0.x CLI fails with MSB4068 before it reaches a single project.
+          #   8.0.x  — supplies the .NET 8 runtime the net8.0 test assemblies execute against.
+          # The projects' TargetFramework (net8.0) is set in the csproj files and does not
+          # follow from which SDK builds them.
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Restore
         run: dotnet restore Greenhouse.slnx
 
       - name: Build
-        # Warnings are already errors for package downgrades (NU1605); keep the build strict
-        # rather than letting a warning-only regression through the gate.
-        run: dotnet build Greenhouse.slnx --configuration Release --no-restore
+        # -warnaserror is what makes this strict: the solution builds with 0 warnings today, so
+        # a warning-only regression is a real regression and should fail the gate rather than
+        # scroll past in a log nobody opens.
+        run: dotnet build Greenhouse.slnx --configuration Release --no-restore -warnaserror
 
       - name: Test
         run: dotnet test Greenhouse.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=test-results.trx"

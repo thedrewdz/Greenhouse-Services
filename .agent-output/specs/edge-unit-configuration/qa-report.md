@@ -61,18 +61,35 @@ operation**, so a connection must survive the connecting process exiting. It doe
 observed `Connected: yes` afterwards. `connect` does require the device to be in bluetoothd's cache,
 which the preceding scan provides.
 
-### 2. Scan window (#47) — **Partial pass**
+### 2. Scan window (#47) — **Pass; #47 closed**
+
+Run twice: once with the ESP32 advertising, then again with it **powered off**, so `bluetoothctl` was
+genuinely silent. The silent run is the one that matters — this issue is about a pending pipe read that
+does not observe cancellation on Linux, with nothing arriving to end it. RF was confirmed clear first
+by a 25 s raw sweep matching zero `GH-Edge-` names.
 
 | Check | Result |
 |---|---|
-| Scan does not park past its window | **Pass** — closed at +30 s to the second |
-| Cancel mid-scan returns to idle promptly, no `bluetoothctl` left | **Pass** — child `pid 2856` confirmed alive, cancel returned in **75 ms**, child reaped, zero `bluetoothctl` remaining |
-| Daemon shutdown not blocked by an in-flight scan | **Pass** — child `pid 2955` alive, `systemctl stop` completed in **219 ms**, no orphan |
-| Empty RF environment reaches `no-device-found` inside the window | **Not run** — a `GH-Edge-` unit was advertising throughout |
+| Scan does not park past its window (unit present) | **Pass** — closed at +30 s to the second |
+| **Empty RF reaches `no-device-found` inside the window** | **Pass** — scan at `19:19:20.807`; `scanning` held with child `pid 3732` alive for the full window, flipped to `no-device-found` between t+30.8 s and t+33.0 s (2.1 s poll), consistent with 30 s plus the bounded ≤2 s graceful teardown. No orphan |
+| Cancel mid-scan, unit present | **Pass** — child `pid 2856` alive, cancel returned in **75 ms**, child reaped, zero `bluetoothctl` remaining |
+| **Cancel mid-scan, silent** | **Pass** — child `pid 3869` alive and silent, cancel returned `idle` in **159 ms**, child reaped |
+| Shutdown not blocked, unit present | **Pass** — child `pid 2955` alive, `systemctl stop` in **219 ms**, no orphan |
+| **Shutdown not blocked, silent** | **Pass** — child `pid 3925` alive 5 s into the window, `systemctl stop` in **175 ms**, child reaped, no kill-timeout in the journal |
 
-#47 is **not** closed on this evidence. The park it describes needs a *silent* `bluetoothctl`; with a
-unit advertising, stdout kept producing lines, so the timer-only abandonment path was never the thing
-under test. Needs one run with no unit powered.
+The window is closed by the timer rather than by the read, and the abandoned read is completed by
+teardown closing the pipe — the `WindowAsync` / `Task.WhenAny` design does what its comment claims, on
+the target device, in the condition that would have exposed the park. **#47 closed.**
+
+Two unrelated defects surfaced from these runs:
+
+- **#76** — a scan with zero candidates cannot be cancelled without fabricating a device id, because
+  the only route is `POST /api/onboarding/{deviceId}/cancel` and there is no unscoped cancel (`404`).
+  The endpoint then *ignores* the id: `POST /api/onboarding/000000000000/cancel` cancelled the running
+  session and returned `200`, for a device never discovered.
+- **#77** — a scan aborted by shutdown is persisted as **`no-device-found`**, a terminal outcome
+  claiming a completed scan, and it survives every later restart. Same missing rule as #74, different
+  aggregate.
 
 ### 3. `bluetoothctl` stderr / #41 — **Pass; deadlock not reproducible**
 
@@ -156,9 +173,11 @@ like progress and never resolves. Filed as **#74**.
 | **#72** | **Blocking** | GATT read/write issued in `bluetoothctl`'s main menu; provisioning cannot succeed, and the write failure is silent |
 | **#74** | High | Restart mid-publish orphans a mapping at `published` with no retry or recovery |
 | **#73** | Medium | Scan RSSI is always null on-device; `bluetoothctl` emits no RSSI lines, so the descending-RSSI ordering is inert |
+| **#76** | Medium | A scan with no candidates cannot be cancelled without fabricating a device id, which the endpoint then ignores |
+| **#77** | Low | A scan aborted by shutdown is persisted as `no-device-found` and survives every later restart |
 
 Closed on this pass's evidence: **#41** (characterised, deadlock unreachable), **#67** and **#68**
-(premises refuted). Left open with partial evidence: **#47** (needs an empty-RF run).
+(premises refuted), **#47** (all three scan-window checks pass, including the silent case).
 
 ## Incidental findings
 
@@ -174,7 +193,6 @@ Closed on this pass's evidence: **#41** (characterised, deadlock unreachable), *
 - **BLE provisioning end to end.** Blocked by #72. Cannot be attempted again until that is fixed.
 - **First heartbeat from a real Edge Unit**, and therefore the real onboarding completion path. Every
   heartbeat in section 4 came from a simulated peer.
-- **Empty-RF `no-device-found`** (section 2), which is the decisive case for #47.
 - **Main Unit setup path.** `POST /api/setup/wifi-config` performs a live `nmcli dev wifi connect`, and
   the Pi is reachable only over that WiFi link, so it was deliberately not exercised. Provisioning is
   gated on stored WiFi credentials, which is a second reason section 1 could not complete.

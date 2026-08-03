@@ -18,7 +18,9 @@ Guide agents to implement reliable Main Unit persistence for configuration, tele
 
 - Main Unit configuration is the source of truth.
 - Edge Unit runtime mappings are persisted centrally.
-- WiFi credentials are not stored in the app database.
+- WiFi credentials **are** persisted in the `WifiCredentials` table (single row, upserted on a
+  successful connection; plaintext in Phase 1 — encryption at rest is deferred to Phase 2). They
+  must never appear in the `MainConfigs` table, in an API response, or in log output.
 - Store received UTC timestamps for inbound MQTT messages.
 
 ## Repository Rules

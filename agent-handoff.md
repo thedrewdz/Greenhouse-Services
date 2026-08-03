@@ -76,8 +76,10 @@ Epic #25 — Edge Unit Onboarding and Configuration:
   fails with `errorCode: null` and a diagnostic `errorMessage`. Raised in the same doc issue.
 - Adapter naming reconciliation still pending from the previous session: implemented as
   `NmcliNetworkAdapter`; spec/#22 say `NetworkManagerAdapter`.
-- Storage skill (`dotnet-storage-and-persistence.md`) says "WiFi credentials are not stored in
-  the app database" — still contradicts the spec's `WifiCredentials` table.
+- ~~Storage skill (`dotnet-storage-and-persistence.md`) says "WiFi credentials are not stored in
+  the app database" — still contradicts the spec's `WifiCredentials` table.~~ **Resolved (#39):**
+  the rule now states credentials *are* persisted in `WifiCredentials` (plaintext Phase 1) and must
+  never reach `MainConfigs`, API responses, or logs.
 
 ## Code Review of PR #45 — findings filed and fixed on the branch
 

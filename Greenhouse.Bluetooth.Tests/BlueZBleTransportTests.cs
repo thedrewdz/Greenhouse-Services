@@ -100,6 +100,63 @@ public class BlueZBleTransportTests
         Assert.Contains(ControllerError, ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Regression for #65: a session can fail without being cancelled. The child here exits before
+    /// <see cref="BlueZBleTransport.ConnectAsync"/> drives the second half of its stdin, so the
+    /// write lands on a closed pipe. That must not escape as a raw <see cref="IOException"/> — the
+    /// onboarding workflow surfaces the message straight to the operator.
+    /// </summary>
+    [Fact]
+    public async Task RunSession_wraps_a_failure_when_the_child_exits_before_stdin_is_driven()
+    {
+        // No stdin read and no delay: the child is long gone by the time ConnectAsync flushes
+        // "quit", five seconds in. This is the race without the FailingScript workaround.
+        var transport = ShellTransport("exit 0", "exit /b 0");
+        using var timeout = new CancellationTokenSource(SessionTimeout);
+
+        var ex = await Assert.ThrowsAsync<BleTransportException>(
+            () => transport.ConnectAsync(SampleAddress, timeout.Token));
+
+        Assert.IsAssignableFrom<IOException>(ex.InnerException);
+    }
+
+    /// <summary>
+    /// Regression for #65: the same failure must also tear the subprocess down. <c>Process.Dispose</c>
+    /// does not kill, so without teardown a live-but-wedged <c>bluetoothctl</c> is leaked on the Pi.
+    /// The child here closes its own stdin — making the parent's write fail — but stays alive
+    /// ticking a file, so the test can see whether it was actually killed.
+    /// </summary>
+    [Fact]
+    public async Task RunSession_kills_a_child_that_survives_the_failure()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            // Needs a shell that can close an inherited descriptor; the target unit is Linux.
+            return;
+        }
+
+        var heartbeat = Path.Combine(Path.GetTempPath(), $"gh-ble-65-{Guid.NewGuid():N}");
+        var transport = ShellTransport(
+            $"exec 0<&-; while true; do echo tick >> {heartbeat}; sleep 0.2; done",
+            windowsScript: string.Empty);
+        using var timeout = new CancellationTokenSource(SessionTimeout);
+
+        try
+        {
+            await Assert.ThrowsAsync<BleTransportException>(
+                () => transport.ConnectAsync(SampleAddress, timeout.Token));
+
+            var atFailure = new FileInfo(heartbeat).Length;
+            await Task.Delay(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(atFailure, new FileInfo(heartbeat).Length);
+        }
+        finally
+        {
+            File.Delete(heartbeat);
+        }
+    }
+
     private const string SampleAddress = "AA:BB:CC:DD:EE:01";
 
     private const string ControllerError = "No default controller available";

@@ -389,6 +389,12 @@ internal sealed class BlueZBleTransport : IBleTransport
     /// so a session that writes more than the OS pipe buffer holds would block on the write and
     /// never reach exit. Both reads start before <paramref name="drive"/> so neither stream can
     /// back up while the session is being driven.
+    ///
+    /// Every failure path tears the session down, not just cancellation. A session can fail without
+    /// being cancelled — most readily when <c>bluetoothctl</c> exits mid-session and the next stdin
+    /// write lands on a closed pipe — and without teardown that leaves a live-but-wedged subprocess
+    /// on the unit and two abandoned reads. Failures other than cancellation are wrapped so callers
+    /// only ever see <see cref="BleTransportException"/> from this transport.
     /// </remarks>
     private async Task<string> RunSessionAsync(
         Func<StreamWriter, CancellationToken, Task> drive,
@@ -398,32 +404,40 @@ internal sealed class BlueZBleTransport : IBleTransport
 
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var drained = false;
 
         try
         {
             await drive(process.StandardInput, cancellationToken);
             await process.WaitForExitAsync(cancellationToken);
+
+            // Awaited together so a fault in one still observes the other.
+            await Task.WhenAll(outputTask, errorTask);
+            drained = true;
+
+            if (process.ExitCode != 0)
+            {
+                // stderr is the only diagnosis available for an on-device session that never ran.
+                throw new BleTransportException(
+                    $"bluetoothctl exited with code {process.ExitCode}: {Excerpt(errorTask.Result)}");
+            }
+
+            return outputTask.Result;
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not BleTransportException)
         {
-            // Killing the process closes both pipes, which completes the abandoned reads.
-            StopProcess(process);
-            Forget(outputTask);
-            Forget(errorTask);
-            throw;
+            throw new BleTransportException("The bluetoothctl session failed.", ex);
         }
-
-        var output = await outputTask;
-        var error = await errorTask;
-
-        if (process.ExitCode != 0)
+        finally
         {
-            // stderr is the only diagnosis available for an on-device session that never ran.
-            throw new BleTransportException(
-                $"bluetoothctl exited with code {process.ExitCode}: {Excerpt(error)}");
+            if (!drained)
+            {
+                // Killing the process closes both pipes, which completes the abandoned reads.
+                StopProcess(process);
+                Forget(outputTask);
+                Forget(errorTask);
+            }
         }
-
-        return output;
     }
 
     /// <summary>Condenses subprocess stderr into a single bounded line for an exception message.</summary>

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -224,6 +225,38 @@ public class BlueZBleTransportTests
     }
 
     /// <summary>
+    /// The write half of #72 against a verbatim device capture. The read half got two real captures;
+    /// the write half was left asserted entirely against hand-written strings, which is the same
+    /// multi-site gap as #69 — the site named in the issue gets the coverage, the sibling site fixed
+    /// on the same branch does not.
+    /// </summary>
+    /// <remarks>
+    /// Captured on the test Pi (BlueZ 5.66) against `GH-Edge-704BCA69CC00` by writing to the
+    /// provisioning-*status* characteristic, which the firmware exposes read-only — a real refusal
+    /// that changes no provisioning state.
+    ///
+    /// It shows the thing a hand-written fixture would not: bluetoothctl prints "Attempting to write"
+    /// for a write it then **fails**, so the dispatch acknowledgement alone is not evidence the bytes
+    /// landed. The refusal check has to run first, and this proves the ordering in
+    /// <see cref="BlueZBleTransport.WriteCharacteristicAsync"/> is what makes the difference.
+    ///
+    /// What it does not prove: the *successful* write path has no committed capture, because
+    /// producing one means writing real WiFi credentials to a unit that is already provisioned.
+    /// </remarks>
+    [Fact]
+    public async Task Write_fails_on_a_real_device_write_refusal_transcript()
+    {
+        var transcript = File.ReadAllText(TestDataPath("bluetoothctl-write-refused-704BCA69CC00.txt"));
+
+        // The refusal has to win over the acknowledgement, which this capture also contains.
+        Assert.Contains("Attempting to write", transcript, StringComparison.Ordinal);
+
+        var ex = await Assert.ThrowsAsync<BleTransportException>(() => WriteAsync(GattTranscript(transcript)));
+
+        Assert.Contains("Failed to write: org.bluez.Error.NotSupported", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Regression for #72: a refused read parsed to zero bytes, and the adapter above reported that
     /// as an empty response *from the Edge Unit* — error 2099 blaming a device that was powered,
     /// advertising, and answering correctly. It must surface as the transport fault it is.
@@ -255,6 +288,52 @@ public class BlueZBleTransportTests
         var bytes = await ReadAsync(GattTranscript(GattMenuHelp + ReadTranscript));
 
         Assert.Equal(StatusPayload, Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
+    /// The whole read path over a verbatim device capture, not just the parser.
+    /// <see cref="ParseReadValue_reads_the_success_payload_from_a_real_device_transcript"/> feeds the
+    /// same file to <see cref="BlueZBleTransport.ParseReadValue"/> alone, which leaves the two guards
+    /// in front of it — the refusal scan and the dispatch acknowledgement — asserted only against
+    /// hand-written text. Both run over the *whole* transcript, and since #72 that transcript carries
+    /// the real <c>menu gatt</c> help listing, every prompt bluetoothctl interleaves into it, and the
+    /// payload's own ASCII column. Nothing else proves none of that trips them.
+    /// </summary>
+    [Fact]
+    public async Task Read_returns_the_value_from_a_real_device_session_transcript()
+    {
+        var transcript = File.ReadAllText(TestDataPath("bluetoothctl-read-success-704BCA69CC00.txt"));
+
+        var bytes = await ReadAsync(GattTranscript(transcript));
+
+        Assert.Equal(
+            "{\"result\":\"success\",\"error_code\":0,\"error_message\":\"\"}",
+            Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
+    /// The refusal scan runs over the entire transcript, and a value's ASCII column is part of it, so
+    /// a phrase from the refusal list appearing inside the Edge Unit's own <c>error_message</c> is
+    /// read as bluetoothctl refusing the command. The firmware fills that field with
+    /// <c>snprintf</c> from free text (<c>edge/greenhouse-edge/src/codec_json.c</c>), so it is
+    /// device-controlled — exactly the untrusted input <c>ScanRefusalMarkers</c> was deliberately
+    /// narrowed for at the scan end, and not narrowed for here.
+    /// </summary>
+    [Fact(Skip = "Fails: reproduces open defect #82. Remove this Skip as part of fixing it.")]
+    public async Task Read_is_not_refused_by_a_payload_whose_text_contains_a_refusal_phrase()
+    {
+        const string payload =
+            "{\"result\":\"error\",\"error_code\":2010,\"error_message\":\"wifi radio not available\"}";
+        var dump = HexDump(payload);
+
+        // The hazard is the phrase landing in one line's ASCII column, and the hexdump wraps every
+        // sixteen bytes — so a payload that merely contains it can still straddle a line break and
+        // pass without exercising anything. Fail loudly rather than vacuously if that alignment goes.
+        Assert.Contains("not available", dump, StringComparison.Ordinal);
+
+        var bytes = await ReadAsync(GattTranscript(ReadAcknowledgement + "\n" + dump));
+
+        Assert.Equal(payload, Encoding.UTF8.GetString(bytes));
     }
 
     /// <summary>
@@ -474,6 +553,46 @@ public class BlueZBleTransportTests
         "write <data=xx xx ...> [offset] [type]            Write attribute value\n" +
         "back                                              Return to main menu\n" +
         "[bluetooth]#                         [CHG] Controller E4:5F:01:8E:47:93 Pairable: yes\n";
+
+    /// <summary>
+    /// Renders bytes in <c>bt_shell_hexdump</c>'s shape — up to sixteen hex pairs, two spaces, then
+    /// the same bytes as printable ASCII.
+    /// </summary>
+    /// <remarks>
+    /// This is a stand-in, and a rendered one: the committed captures are the real unit's bytes, but
+    /// the unit cannot be asked to return a *chosen* payload on demand, and the hazard being tested
+    /// is a specific string landing in the ASCII column. The shape is taken from the committed
+    /// captures rather than invented. What it does not prove is that bluetoothctl renders this
+    /// particular payload exactly so — only that the parser and the guards handle that rendering.
+    /// </remarks>
+    private static string HexDump(string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        var dump = new StringBuilder();
+
+        for (var offset = 0; offset < bytes.Length; offset += 16)
+        {
+            var line = bytes.AsSpan(offset, Math.Min(16, bytes.Length - offset));
+
+            dump.Append("  ");
+
+            foreach (var b in line)
+            {
+                dump.Append(b.ToString("x2", CultureInfo.InvariantCulture)).Append(' ');
+            }
+
+            dump.Append(new string(' ', ((16 - line.Length) * 3) + 1));
+
+            foreach (var b in line)
+            {
+                dump.Append(b is >= 0x20 and < 0x7f ? (char)b : '.');
+            }
+
+            dump.Append('\n');
+        }
+
+        return dump.ToString();
+    }
 
     /// <summary>Long enough that the stand-in finishes inside it, short enough not to pad the suite.</summary>
     private static readonly TimeSpan ScanWindow = TimeSpan.FromSeconds(10);

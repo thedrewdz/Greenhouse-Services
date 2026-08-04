@@ -312,6 +312,34 @@ public class BlueZBleTransportTests
     }
 
     /// <summary>
+    /// A second real capture of the same successful read, taken at different inter-command timings so
+    /// bluetoothctl interleaves its asynchronous chatter differently.
+    /// </summary>
+    /// <remarks>
+    /// #82's fix decides what is a control line and what is the device's value, and the arrangement of
+    /// the two is timing-dependent, not fixed. In this capture `Agent registered` and
+    /// `[CHG] Controller … Pairable: yes` land *between* `select-attribute` and the value, where the
+    /// committed slow capture has them earlier — so the anchored refusal match is exercised against
+    /// control lines sitting right up against the hexdump.
+    ///
+    /// Captured across four timings on the test Pi; twelve captures showed no value line carrying a
+    /// doubled prompt and no line mixing value and control text, which is the framing the fix relies
+    /// on. That is evidence for BlueZ 5.66 against this unit, not a proof for all versions.
+    /// </remarks>
+    [Fact]
+    public async Task Read_returns_the_value_when_control_lines_interleave_with_the_hexdump()
+    {
+        var transcript = File.ReadAllText(
+            TestDataPath("bluetoothctl-read-success-interleaved-704BCA69CC00.txt"));
+
+        var bytes = await ReadAsync(GattTranscript(transcript));
+
+        Assert.Equal(
+            "{\"result\":\"success\",\"error_code\":0,\"error_message\":\"\"}",
+            Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
     /// Regression for #82. The refusal scan ran over the entire transcript, and a value's ASCII
     /// column is part of it, so a phrase from the refusal list appearing inside the Edge Unit's own
     /// <c>error_message</c> was read as bluetoothctl refusing the command. The firmware fills that
@@ -650,17 +678,6 @@ public class BlueZBleTransportTests
         "[bluetooth]#                         [CHG] Controller E4:5F:01:8E:47:93 Pairable: yes\n";
 
     /// <summary>
-    /// Renders bytes in <c>bt_shell_hexdump</c>'s shape — up to sixteen hex pairs, two spaces, then
-    /// the same bytes as printable ASCII.
-    /// </summary>
-    /// <remarks>
-    /// This is a stand-in, and a rendered one: the committed captures are the real unit's bytes, but
-    /// the unit cannot be asked to return a *chosen* payload on demand, and the hazard being tested
-    /// is a specific string landing in the ASCII column. The shape is taken from the committed
-    /// captures rather than invented. What it does not prove is that bluetoothctl renders this
-    /// particular payload exactly so — only that the parser and the guards handle that rendering.
-    /// </remarks>
-    /// <summary>
     /// Builds a payload in which <paramref name="phrase"/> is guaranteed to land inside a single
     /// hexdump line's ASCII column, padding the value until it aligns.
     /// </summary>
@@ -684,6 +701,17 @@ public class BlueZBleTransportTests
         throw new InvalidOperationException($"No padding put '{phrase}' inside one hexdump line.");
     }
 
+    /// <summary>
+    /// Renders bytes in <c>bt_shell_hexdump</c>'s shape — up to sixteen hex pairs, two spaces, then
+    /// the same bytes as printable ASCII.
+    /// </summary>
+    /// <remarks>
+    /// This is a stand-in, and a rendered one: the committed captures are the real unit's bytes, but
+    /// the unit cannot be asked to return a *chosen* payload on demand, and the hazard being tested
+    /// is a specific string landing in the ASCII column. The shape is taken from the committed
+    /// captures rather than invented. What it does not prove is that bluetoothctl renders this
+    /// particular payload exactly so — only that the parser and the guards handle that rendering.
+    /// </remarks>
     private static string HexDump(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);

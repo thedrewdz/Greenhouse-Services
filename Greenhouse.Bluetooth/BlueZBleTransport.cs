@@ -431,6 +431,13 @@ internal sealed class BlueZBleTransport : IBleTransport
     /// <summary>Bytes per line in bluetoothctl's value hexdump (<c>bt_shell_hexdump</c> in BlueZ).</summary>
     private const int HexDumpBytesPerLine = 16;
 
+    /// <summary>
+    /// Tail of the header bluetoothctl prints for a value it reports as a property change —
+    /// "[CHG] Attribute &lt;path&gt; Value:". A read triggers one of these on top of its own reply,
+    /// so a read transcript carries the value twice (#80).
+    /// </summary>
+    private const string ValueNotificationMarker = "Value:";
+
     /// <summary>Colour and readline markers bluetoothctl emits even when its output is a pipe.</summary>
     private static readonly Regex TerminalMarkers = new("\u001b\\[[0-9;]*[a-zA-Z]|[\u0001\u0002]", RegexOptions.Compiled);
 
@@ -449,33 +456,93 @@ internal sealed class BlueZBleTransport : IBleTransport
     /// </remarks>
     internal static byte[] ParseReadValue(string output)
     {
-        var bytes = new List<byte>();
+        var blocks = ParseHexDumpBlocks(output);
+
+        return blocks.Count switch
+        {
+            0 => [],
+            1 => Undouble(output, blocks[0]),
+
+            // Identical blocks are one value echoed twice — the notification and the reply for the
+            // same read. A last block that differs is the reply, which is the answer to the command
+            // this session actually issued.
+            _ => blocks.All(block => block.SequenceEqual(blocks[0])) ? blocks[0] : blocks[^1],
+        };
+    }
+
+    /// <summary>
+    /// Splits a transcript into the hexdump blocks it contains.
+    /// </summary>
+    /// <remarks>
+    /// A block is framed by the hexdump's own shape rather than by anything between the lines:
+    /// <c>bt_shell_hexdump</c> emits sixteen bytes per line and closes with a short one. There is no
+    /// textual separator to use instead — bluetoothctl reprints its prompt between *every* value
+    /// line, inside a block as much as between two.
+    /// </remarks>
+    private static List<byte[]> ParseHexDumpBlocks(string output)
+    {
+        var blocks = new List<byte[]>();
+        var current = new List<byte>();
 
         foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
-            AppendHexDumpLine(bytes, line);
+            var count = AppendHexDumpLine(current, line);
+            if (count is 0 or HexDumpBytesPerLine)
+            {
+                continue;
+            }
+
+            // A short line closes the dump.
+            blocks.Add(current.ToArray());
+            current.Clear();
         }
 
-        return bytes.ToArray();
+        if (current.Count > 0)
+        {
+            blocks.Add(current.ToArray());
+        }
+
+        return blocks;
     }
 
-    private static void AppendHexDumpLine(List<byte> bytes, string rawLine)
+    /// <summary>
+    /// Recovers a single value from one block that is really two.
+    /// </summary>
+    /// <remarks>
+    /// The short-line rule cannot frame a value whose length is an exact multiple of sixteen — there
+    /// is no short line to close it — so the notification and the reply run together into one block
+    /// of twice the length. Splitting on the notification header would not help: bluetoothctl also
+    /// prints the reply's dump with no header at all.
+    /// </remarks>
+    private static byte[] Undouble(string output, byte[] block) =>
+        block.Length % 2 == 0
+        && output.Contains(ValueNotificationMarker, StringComparison.Ordinal)
+        && block.AsSpan(0, block.Length / 2).SequenceEqual(block.AsSpan(block.Length / 2))
+            ? block[..(block.Length / 2)]
+            : block;
+
+    /// <summary>Appends one line's value bytes and returns how many it held.</summary>
+    private static int AppendHexDumpLine(List<byte> bytes, string rawLine)
     {
         var line = StripPrompt(TerminalMarkers.Replace(rawLine, string.Empty).Trim());
 
         var tokens = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
         var take = Math.Min(tokens.Length, HexDumpBytesPerLine);
+        var count = 0;
 
         for (var i = 0; i < take; i++)
         {
             if (!TryParseHexPair(tokens[i], out var value))
             {
                 // Either this is not a value line at all, or the ASCII column has begun.
-                return;
+                break;
             }
 
             bytes.Add(value);
+            count++;
         }
+
+        return count;
     }
 
     /// <summary>

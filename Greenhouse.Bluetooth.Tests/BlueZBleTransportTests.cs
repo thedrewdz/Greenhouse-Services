@@ -84,6 +84,64 @@ public class BlueZBleTransportTests
         Assert.Equal(StatusPayload, Encoding.UTF8.GetString(bytes));
     }
 
+    /// <summary>
+    /// Regression for #80, against a verbatim transcript captured from `bluetoothctl` 5.66 on the
+    /// test Pi reading the provisioning-status characteristic of a real Edge Unit — terminal escapes,
+    /// interleaved prompts, embedded carriage returns and all.
+    /// </summary>
+    /// <remarks>
+    /// A read makes bluetoothctl print the value **twice**: once as the `[CHG] Attribute ... Value:`
+    /// property-change notification the read itself triggers, and once as the read's own reply. So
+    /// the transcript holds the 86-byte payload as 172 bytes, which
+    /// `BleEdgeUnitProvisioningAdapter.ParseStatus` fails to deserialise — provisioning still ends at
+    /// error 2099, on a unit that answered perfectly. The #72 menu fix alone does not get past this.
+    ///
+    /// No hand-written fixture would have caught it. This one is the device's own bytes.
+    /// </remarks>
+    [Fact]
+    public void ParseReadValue_reads_one_value_from_a_real_device_transcript()
+    {
+        var transcript = File.ReadAllText(TestDataPath("bluetoothctl-read-704BCA69CC00.txt"));
+
+        var bytes = BlueZBleTransport.ParseReadValue(transcript);
+
+        Assert.Equal(
+            "{\"result\":\"error\",\"error_code\":2099,\"error_message\":\"no provisioning payload received\"}",
+            Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
+    /// The #80 double-print with a payload whose length is an exact multiple of sixteen, so no short
+    /// line closes the first dump and the two runs merge into one apparent block.
+    /// </summary>
+    [Fact]
+    public void ParseReadValue_reads_one_value_when_the_two_dumps_cannot_be_framed_by_length()
+    {
+        const string payload = "{\"result\":\"ok\"}\n";           // exactly 16 bytes
+        var dump =
+            "[CHG] Attribute /org/bluez/hci0/dev_X/service000e/char0011 Value:\n" +
+            "  7b 22 72 65 73 75 6c 74 22 3a 22 6f 6b 22 7d 0a  {\"result\":\"ok\"}.\n" +
+            "  7b 22 72 65 73 75 6c 74 22 3a 22 6f 6b 22 7d 0a  {\"result\":\"ok\"}.\n";
+
+        var bytes = BlueZBleTransport.ParseReadValue(dump);
+
+        Assert.Equal(payload, Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>Two blocks that genuinely differ: the reply is the answer to the issued command.</summary>
+    [Fact]
+    public void ParseReadValue_prefers_the_reply_when_the_two_dumps_disagree()
+    {
+        const string output =
+            "[CHG] Attribute /org/bluez/hci0/dev_X/service000e/char0011 Value:\n" +
+            "  7b 22 6f 6c 64 22 7d                              {\"old\"}\n" +
+            "  7b 22 6e 65 77 22 7d                              {\"new\"}\n";
+
+        var bytes = BlueZBleTransport.ParseReadValue(output);
+
+        Assert.Equal("{\"new\"}", Encoding.UTF8.GetString(bytes));
+    }
+
     /// <summary>A value line can arrive with bluetoothctl's interleaved prompt in front of it.</summary>
     [Fact]
     public void ParseReadValue_reads_a_value_line_behind_a_prompt()
@@ -401,6 +459,9 @@ public class BlueZBleTransportTests
 
     /// <summary>Long enough that the stand-in finishes inside it, short enough not to pad the suite.</summary>
     private static readonly TimeSpan ScanWindow = TimeSpan.FromSeconds(10);
+
+    private static string TestDataPath(string name) =>
+        Path.Combine(AppContext.BaseDirectory, "TestData", name);
 
     private static string ExpectedGattSequence(string command) =>
         string.Join(

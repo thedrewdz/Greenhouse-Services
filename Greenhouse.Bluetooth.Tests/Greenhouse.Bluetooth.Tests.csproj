@@ -24,4 +24,13 @@
     <ProjectReference Include="..\Greenhouse.Bluetooth\Greenhouse.Bluetooth.csproj" />
   </ItemGroup>
 
+  <!--
+    Verbatim bluetoothctl transcripts captured from the test Pi against a real Edge Unit, terminal
+    control bytes and all. Hand-written fixtures cannot stand in for these: #72 and #80 were both
+    faults in what bluetoothctl actually emits, which no stand-in reproduces.
+  -->
+  <ItemGroup>
+    <None Include="TestData\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

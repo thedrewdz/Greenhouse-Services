@@ -9,9 +9,14 @@ Durable policy, canonical context, architecture, MQTT contracts, ADRs, and skill
 ## Current Workspace State
 
 - Repository purpose: Greenhouse Main Unit services (headless C#/.NET brain).
-- Branch: `feature/25-edge-unit-onboarding-and-configuration`.
-- Epic #25 (Edge Unit Onboarding and Configuration — Services) implemented across all seven
-  sub-issues (#30–#36). Solution builds clean; 235 tests pass.
+- Branch: `feature/72-ble-gatt-menu-sequence`.
+- Bugs #72 (BLE GATT commands issued in `bluetoothctl`'s main menu), #80 (a read's value is printed
+  twice) and #82 (the refusal guard matched the device's own payload text) fixed. Solution builds
+  clean; **294 tests pass**. #72's AC #4 is verified on-device: a real provisioning round trip reached
+  the firmware, which returned success, and the unit is registered and heartbeating. The round trip was
+  re-run after the #82 fix.
+- Epic #25 (Edge Unit Onboarding and Configuration — Services) was implemented and merged earlier
+  across all seven sub-issues (#30–#36).
 
 ## Current Progress Snapshot
 
@@ -153,8 +158,112 @@ Re-verified after these fixes: `dotnet build` clean, 254 tests pass, and the dae
 no UI present, migrates on first run, serves `GET /api/onboarding` and `GET /api/edge-units` with the
 documented shapes, and publishes all seven new paths in OpenAPI.
 
+## Bug #72 — BLE GATT commands were issued in the wrong `bluetoothctl` menu
+
+`select-attribute`, `read`, and `write` live in `bluetoothctl`'s `gatt` submenu. The transport never
+issued `menu gatt`, so on a real device every one of them was refused and BLE provisioning could not
+succeed anywhere. The write was the dangerous half: success was inferred from the *absence* of
+"Failed to write", and the real refusal reads "Invalid command in menu main: write", so a write that
+sent no bytes reported success.
+
+- Both GATT operations now share one `RunGattSessionAsync`, which enters the submenu first. The
+  literal sequence lives in `DriveGattSessionAsync`, extracted so a test can assert it — a
+  `bluetoothctl` stand-in cannot, because it answers whatever it is asked. That is exactly why a
+  green suite missed this.
+- Outcomes are detected positively (`Attempting to read` / `Attempting to write`) and fail closed on
+  refusal. **The accepted and refused strings were taken from `strings` on the `bluetoothctl` 5.66
+  binary on the test Pi, not assumed.**
+- `ParseReadValue` now reads only the leading hex column of each hexdump line. This was forced by the
+  fix: `menu gatt` prints the whole submenu help listing into the transcript the value is parsed
+  from. It also closes a latent defect — the hexdump's ASCII column repeats the payload verbatim, so
+  a value containing `" ad "` had a bare hex pair scanned out of it as an extra byte.
+- Hazard-class sweep (same class = a refusal read as a benign empty result): `ScanAsync` now aborts
+  on a refused `scan on` instead of reporting a greenhouse with no Edge Units, and `DisconnectAsync`
+  surfaces a refusal to its caller's warning log. `ConnectAsync` already detected its outcome
+  positively ("Connection successful") and was left alone.
+
+On-device evidence captured on the test Pi (`192.168.4.94`, BlueZ 5.66) — the exact sequence the code
+now sends, minus the firmware:
+
+```
+BEFORE (main menu, as shipped):  Invalid command in menu main: select-attribute
+                                 Invalid command in menu main: read
+AFTER  (menu gatt first, fixed): No device connected / No attribute selected
+```
+
+The commands are now accepted and reach the GATT layer, failing only for want of a connected unit.
+
+### AC #4 — satisfied, and it found a second defect (#80)
+
+With the ESP32 powered, the full round trip was run against `GH-Edge-704BCA69CC00`
+(`70:4B:CA:69:CC:02`) using the exact sequence the fixed code emits:
+
+- `connect` → `Connection successful`.
+- **Write** of the real 143-byte provisioning payload → `Attempting to write .../char000f`, no
+  refusal. 143 bytes is far past the 20-byte ATT default, so the long-write path is covered too.
+- **Status read** → `{"result":"success","error_code":0,"error_message":""}`.
+- The unit then joined WiFi, reached Mosquitto, and **registered itself**:
+  `GET /api/edge-units` returns it at `pending-mapping` with `lastHeartbeatAt` populated.
+
+**#80 was found doing this, and the #72 menu fix alone does not get provisioning working.** A read
+makes `bluetoothctl` print the value *twice* — once as the `[CHG] Attribute ... Value:` notification
+the read itself triggers, once as the read's own reply. `ParseReadValue` returned the payload
+doubled, which `ParseStatus` cannot deserialise, so provisioning still ended at 2099. Fixed in the
+same PR; both real transcripts are committed under `Greenhouse.Bluetooth.Tests/TestData/`.
+
+**Keep real captured transcripts as fixtures.** Hand-written ones are what let #72 *and* #80 through
+— they have a single dump, no notification, and no terminal noise, because that is what a person
+writes. `TestData/` exists to hold more.
+
+### #82 — the refusal guard matched the Edge Unit's own payload text
+
+Raised by the test pass on this branch, and a regression introduced by the #72 fix itself.
+`EnsureNotRefused` scanned the whole transcript, and a value's ASCII column is part of it — so a
+status payload whose `error_message` contained `"not available"` was reported as bluetoothctl refusing
+the read. A real Edge Unit error (2010) was discarded and replaced with a transport exception.
+
+**This is #72's own hazard inverted.** #72 blamed the Edge Unit for a Main Unit fault; #82 blamed
+bluetoothctl for an Edge Unit report. The scan end had been narrowed for untrusted advertised names
+from the start; the value path had not been given the same treatment, and a value read off the device
+is exactly as untrusted.
+
+Control signals now match only against **control lines** — the transcript with value lines removed —
+and refusal phrases are anchored to the start of a line. `"not available"` on its own is ordinary
+English, so it is spelled out as BlueZ actually emits it (`<Kind> <name> not available`).
+
+Two things fell out of it worth keeping:
+
+- **A value can no longer reach an exception message.** On the write path the value is the provisioning
+  payload, so quoting a transcript line was a route for the WiFi password to reach a log. There is a
+  test asserting a refusal message contains neither the password nor its field name.
+- **Alignment-dependent tests go vacuous silently.** The hexdump wraps every sixteen bytes, so whether
+  a phrase is contiguous in the ASCII column is an accident of the surrounding JSON. The first version
+  of the write-path test passed for the wrong reason. `PayloadWithPhraseInOneLine` computes the padding
+  instead of hand-aligning it.
+
+### Blocker found upstream of onboarding: the daemon cannot store WiFi credentials
+
+`POST /api/setup/wifi-config` fails with `{"connected":false,"errorMessage":"Error: Insufficient
+privileges."}`. The daemon runs as `admin` under systemd with no active login session, so polkit
+refuses the `nmcli` connect. Credentials are persisted *only* on a successful connect, so nothing is
+ever stored, and `ProvisionUnitAsync` fails at **2003 "No WiFi credentials are stored on the Main
+Unit"** before any BLE work happens.
+
+That is why AC #4 had to be driven through `bluetoothctl` directly rather than through the API. Filed
+separately. Until it is fixed, onboarding cannot complete through the daemon on the real unit.
+
+### Test Pi deployment state
+
+`/opt/greenhouse-services/Greenhouse.Bluetooth.dll` is the **Release build of this branch**, not
+`main`. The pre-existing assembly is at `/tmp/Greenhouse.Bluetooth.dll.bak-72`
+(md5 `af2e96d1…`) if it needs restoring. Redeploy from `main` after the PR merges.
+
 ## Next Actions
 
+- **The WiFi-credentials privilege blocker above** — onboarding cannot complete through the daemon
+  until it is fixed. Highest priority of anything here: it gates the whole onboarding journey.
+- **Map the provisioned unit.** `704BCA69CC00` is registered and sitting at `pending-mapping`; the
+  `PUT /api/edge-units/{device_id}` mapping path has still never been exercised on a real unit.
 - On-device verification on the test Pi: BLE scan/provision against a real Edge Unit, and the
   `ghcfg/wr-` → `ghcfg/ack-` round trip against Mosquitto. Neither path can be exercised on a
   development host; unit coverage substitutes fakes at the transport seam. The #47 scan-window fix

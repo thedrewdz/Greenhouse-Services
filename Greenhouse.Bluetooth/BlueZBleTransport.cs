@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace Greenhouse.Bluetooth;
@@ -10,12 +11,18 @@ namespace Greenhouse.Bluetooth;
 /// <see cref="IBleTransport"/> backed by the BlueZ <c>bluetoothctl</c> subprocess on Raspberry Pi
 /// Debian Bookworm — the pattern proven in
 /// <c>services-old/Greenhouse.Bluetooth/BlueZEdgeUnitDiscoveryService</c>. No BLE NuGet dependency
-/// is required. GATT read/write use <c>bluetoothctl</c> interactive-mode commands.
+/// is required. GATT read/write use <c>bluetoothctl</c> interactive-mode commands, which live in its
+/// <c>gatt</c> submenu — see <see cref="EnterGattMenuCommand"/>.
 /// </summary>
 /// <remarks>
 /// The scan-output parser is exercised by unit tests; connect/read/write require BLE hardware and
 /// are validated on-device (see issue #19 acceptance criteria). Every operation is best-effort and
 /// surfaces failures as exceptions so the adapter above can clean up and map to a result.
+///
+/// A stand-in for <c>bluetoothctl</c> cannot tell whether a command sequence is one bluetoothctl
+/// would actually accept — it answers whatever it is asked. That is how #72 stayed invisible through
+/// a green suite, so the literal sequences are asserted directly and the accepted and refused
+/// outputs are taken from the real binary rather than assumed.
 /// </remarks>
 internal sealed class BlueZBleTransport : IBleTransport
 {
@@ -27,9 +34,34 @@ internal sealed class BlueZBleTransport : IBleTransport
     /// <summary>How long a scan teardown may take before the subprocess is killed instead.</summary>
     private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// bluetoothctl keeps <c>select-attribute</c>, <c>read</c>, and <c>write</c> in its <c>gatt</c>
+    /// submenu. Issued from the main menu every one of them is refused outright — "Invalid command
+    /// in menu main: write" — so entering the submenu is the first step of every GATT session.
+    /// Regression #72: without it, BLE provisioning could not succeed on any device.
+    /// </summary>
+    private const string EnterGattMenuCommand = "menu gatt";
+
+    /// <summary>
+    /// How long a GATT session waits after entering the submenu, and again after selecting the
+    /// attribute. A session runs in a <em>new</em> bluetoothctl process attaching to a connection an
+    /// earlier one made, so it must first receive the connected device's attribute tree from
+    /// bluetoothd: until it has, <c>select-attribute</c> answers "No device connected".
+    /// </summary>
+    private static readonly TimeSpan DefaultGattSettleDelay = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How long a GATT session waits for bluetoothd's asynchronous reply before quitting.
+    /// <c>read</c> in particular dispatches immediately and prints the value later, so quitting
+    /// sooner discards it.
+    /// </summary>
+    private static readonly TimeSpan DefaultGattReplyDelay = TimeSpan.FromSeconds(2);
+
     private readonly ILogger<BlueZBleTransport> _logger;
     private readonly string _executable;
     private readonly string _arguments;
+    private readonly TimeSpan _gattSettleDelay;
+    private readonly TimeSpan _gattReplyDelay;
 
     public BlueZBleTransport(ILogger<BlueZBleTransport> logger)
         : this(logger, Executable, string.Empty)
@@ -38,13 +70,21 @@ internal sealed class BlueZBleTransport : IBleTransport
 
     /// <summary>
     /// Test seam: substitutes a stand-in for <c>bluetoothctl</c> so subprocess handling — pipe
-    /// draining and exit-code reporting — can be exercised on a host without BlueZ.
+    /// draining, exit-code reporting, and outcome detection — can be exercised on a host without
+    /// BlueZ. <paramref name="gattStepDelay"/> collapses the GATT session's settle and reply waits
+    /// so those tests do not pay for real device timing; production keeps the defaults.
     /// </summary>
-    internal BlueZBleTransport(ILogger<BlueZBleTransport> logger, string executable, string arguments)
+    internal BlueZBleTransport(
+        ILogger<BlueZBleTransport> logger,
+        string executable,
+        string arguments,
+        TimeSpan? gattStepDelay = null)
     {
         _logger = logger;
         _executable = executable;
         _arguments = arguments;
+        _gattSettleDelay = gattStepDelay ?? DefaultGattSettleDelay;
+        _gattReplyDelay = gattStepDelay ?? DefaultGattReplyDelay;
     }
 
     public async IAsyncEnumerable<BleDeviceInfo> ScanAsync(
@@ -92,6 +132,11 @@ internal sealed class BlueZBleTransport : IBleTransport
                 {
                     break;
                 }
+
+                // Same hazard class as #72 at the other end of the transport: a refused command
+                // otherwise reads as a scan that simply found nothing, and the operator is told the
+                // greenhouse has no Edge Units rather than that the scan never started.
+                EnsureScanLineNotRefused(line);
 
                 var updated = accumulator.Apply(line, filter);
                 if (updated is not null)
@@ -194,22 +239,14 @@ internal sealed class BlueZBleTransport : IBleTransport
     {
         var hexBytes = string.Join(' ', data.Select(b => "0x" + b.ToString("x2", CultureInfo.InvariantCulture)));
 
-        var output = await RunSessionAsync(
-            async (stdin, ct) =>
-            {
-                await stdin.WriteLineAsync($"select-attribute {characteristicUuid:D}");
-                await stdin.WriteLineAsync($"write \"{hexBytes}\"");
-                await stdin.FlushAsync(ct);
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
-                await stdin.WriteLineAsync("quit");
-                await stdin.FlushAsync(ct);
-            },
-            cancellationToken);
+        var output = await RunGattSessionAsync(characteristicUuid, $"write \"{hexBytes}\"", cancellationToken);
 
-        if (output.Contains("Failed to write", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new BleTransportException($"Failed to write characteristic '{characteristicUuid}'.");
-        }
+        EnsureNotRefused(output, $"write characteristic '{characteristicUuid}'");
+
+        // A completed write is confirmed only by bluetoothctl's own dispatch acknowledgement;
+        // success itself is silent. Regression #72: inferring success from the *absence* of "Failed
+        // to write" reported a rejected command as a completed write, and no bytes left the Pi.
+        EnsureAcknowledged(output, WriteAcknowledgement, $"write to characteristic '{characteristicUuid}'");
     }
 
     public async Task<byte[]> ReadCharacteristicAsync(
@@ -218,24 +255,21 @@ internal sealed class BlueZBleTransport : IBleTransport
         Guid characteristicUuid,
         CancellationToken cancellationToken)
     {
-        var output = await RunSessionAsync(
-            async (stdin, ct) =>
-            {
-                await stdin.WriteLineAsync($"select-attribute {characteristicUuid:D}");
-                await stdin.WriteLineAsync("read");
-                await stdin.FlushAsync(ct);
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
-                await stdin.WriteLineAsync("quit");
-                await stdin.FlushAsync(ct);
-            },
-            cancellationToken);
+        var output = await RunGattSessionAsync(characteristicUuid, "read", cancellationToken);
+
+        EnsureNotRefused(output, $"read characteristic '{characteristicUuid}'");
+
+        // Regression #72: a read that never ran parsed to zero bytes, which the adapter above
+        // reported as an empty response *from the Edge Unit* — blaming the device for a Main Unit
+        // fault. A read that was never dispatched is a transport failure and must say so.
+        EnsureAcknowledged(output, ReadAcknowledgement, $"read of characteristic '{characteristicUuid}'");
 
         return ParseReadValue(output);
     }
 
     public async Task DisconnectAsync(string deviceId, CancellationToken cancellationToken)
     {
-        await RunSessionAsync(
+        var output = await RunSessionAsync(
             async (stdin, ct) =>
             {
                 await stdin.WriteLineAsync($"disconnect {deviceId}");
@@ -243,6 +277,65 @@ internal sealed class BlueZBleTransport : IBleTransport
                 await stdin.FlushAsync(ct);
             },
             cancellationToken);
+
+        // Teardown is best-effort — the caller only logs this — but a refusal must still be visible
+        // rather than leaving the operator with a unit that looks disconnected and is not.
+        EnsureNotRefused(output, $"disconnect '{deviceId}'");
+    }
+
+    /// <summary>
+    /// Runs one bluetoothctl session through the GATT sequence and returns its stdout transcript.
+    /// Read and write share it so neither can drift back out of the <c>gatt</c> submenu.
+    /// </summary>
+    private Task<string> RunGattSessionAsync(
+        Guid characteristicUuid,
+        string command,
+        CancellationToken cancellationToken) =>
+        RunSessionAsync(
+            (stdin, ct) => DriveGattSessionAsync(
+                stdin,
+                characteristicUuid,
+                command,
+                _gattSettleDelay,
+                _gattReplyDelay,
+                delay => Task.Delay(delay, ct),
+                ct),
+            cancellationToken);
+
+    /// <summary>
+    /// Writes the literal command sequence for one GATT operation.
+    /// </summary>
+    /// <remarks>
+    /// Extracted from the subprocess so a test can assert the exact lines. #72 was a sequence that
+    /// was well-formed but issued in the wrong menu, and no bluetoothctl stand-in can catch that:
+    /// a stand-in answers whatever it is asked. Only the literal sequence is evidence.
+    ///
+    /// No <c>back</c> follows the operation. The session quits immediately afterwards, and <c>back</c>
+    /// would only dump the whole main-menu help listing into the transcript the value is parsed from.
+    /// </remarks>
+    internal static async Task DriveGattSessionAsync(
+        TextWriter stdin,
+        Guid characteristicUuid,
+        string command,
+        TimeSpan settleDelay,
+        TimeSpan replyDelay,
+        Func<TimeSpan, Task> delay,
+        CancellationToken cancellationToken)
+    {
+        await stdin.WriteLineAsync(EnterGattMenuCommand);
+        await stdin.FlushAsync(cancellationToken);
+        await delay(settleDelay);
+
+        await stdin.WriteLineAsync($"select-attribute {characteristicUuid:D}");
+        await stdin.FlushAsync(cancellationToken);
+        await delay(settleDelay);
+
+        await stdin.WriteLineAsync(command);
+        await stdin.FlushAsync(cancellationToken);
+        await delay(replyDelay);
+
+        await stdin.WriteLineAsync("quit");
+        await stdin.FlushAsync(cancellationToken);
     }
 
     /// <summary>
@@ -335,21 +428,266 @@ internal sealed class BlueZBleTransport : IBleTransport
                 || name.StartsWith(filter.NamePrefix, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>Extracts the hex byte tokens from a <c>bluetoothctl read</c> value dump.</summary>
+    /// <summary>Bytes per line in bluetoothctl's value hexdump (<c>bt_shell_hexdump</c> in BlueZ).</summary>
+    private const int HexDumpBytesPerLine = 16;
+
+    /// <summary>
+    /// Tail of the header bluetoothctl prints for a value it reports as a property change —
+    /// "[CHG] Attribute &lt;path&gt; Value:". A read triggers one of these on top of its own reply,
+    /// so a read transcript carries the value twice (#80).
+    /// </summary>
+    private const string ValueNotificationMarker = "Value:";
+
+    /// <summary>Colour and readline markers bluetoothctl emits even when its output is a pipe.</summary>
+    private static readonly Regex TerminalMarkers = new("\u001b\\[[0-9;]*[a-zA-Z]|[\u0001\u0002]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Extracts the value from a <c>bluetoothctl read</c> transcript.
+    /// </summary>
+    /// <remarks>
+    /// bluetoothctl renders a value as a hexdump: up to sixteen space-separated hex pairs, two
+    /// spaces, then the same bytes as printable ASCII. Only that leading hex column is the value, so
+    /// each line is read from its start and abandoned at the first token that is not a hex pair.
+    ///
+    /// Scanning the whole transcript for anything hex-shaped invents bytes that were never read. The
+    /// ASCII column repeats the payload verbatim, spaces included, so a value containing " ad " puts
+    /// a bare hex pair there; and since #72 the transcript also carries the <c>gatt</c> submenu's
+    /// help listing, which <see cref="EnterGattMenuCommand"/> prints on the way in.
+    /// </remarks>
     internal static byte[] ParseReadValue(string output)
     {
-        var bytes = new List<byte>();
+        var blocks = ParseHexDumpBlocks(output);
 
-        foreach (var token in output.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        return blocks.Count switch
         {
-            var hex = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? token[2..] : token;
-            if (hex.Length == 2 && byte.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value))
+            0 => [],
+            1 => Undouble(output, blocks[0]),
+
+            // Identical blocks are one value echoed twice — the notification and the reply for the
+            // same read. A last block that differs is the reply, which is the answer to the command
+            // this session actually issued.
+            _ => blocks.All(block => block.SequenceEqual(blocks[0])) ? blocks[0] : blocks[^1],
+        };
+    }
+
+    /// <summary>
+    /// Splits a transcript into the hexdump blocks it contains.
+    /// </summary>
+    /// <remarks>
+    /// A block is framed by the hexdump's own shape rather than by anything between the lines:
+    /// <c>bt_shell_hexdump</c> emits sixteen bytes per line and closes with a short one. There is no
+    /// textual separator to use instead — bluetoothctl reprints its prompt between *every* value
+    /// line, inside a block as much as between two.
+    /// </remarks>
+    private static List<byte[]> ParseHexDumpBlocks(string output)
+    {
+        var blocks = new List<byte[]>();
+        var current = new List<byte>();
+
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var count = AppendHexDumpLine(current, line);
+            if (count is 0 or HexDumpBytesPerLine)
             {
-                bytes.Add(value);
+                continue;
             }
+
+            // A short line closes the dump.
+            blocks.Add(current.ToArray());
+            current.Clear();
         }
 
-        return bytes.ToArray();
+        if (current.Count > 0)
+        {
+            blocks.Add(current.ToArray());
+        }
+
+        return blocks;
+    }
+
+    /// <summary>
+    /// Recovers a single value from one block that is really two.
+    /// </summary>
+    /// <remarks>
+    /// The short-line rule cannot frame a value whose length is an exact multiple of sixteen — there
+    /// is no short line to close it — so the notification and the reply run together into one block
+    /// of twice the length. Splitting on the notification header would not help: bluetoothctl also
+    /// prints the reply's dump with no header at all.
+    /// </remarks>
+    private static byte[] Undouble(string output, byte[] block) =>
+        block.Length % 2 == 0
+        && output.Contains(ValueNotificationMarker, StringComparison.Ordinal)
+        && block.AsSpan(0, block.Length / 2).SequenceEqual(block.AsSpan(block.Length / 2))
+            ? block[..(block.Length / 2)]
+            : block;
+
+    /// <summary>
+    /// Strips a transcript line down to its content: terminal escapes gone, and any prompt
+    /// bluetoothctl printed in front of it gone. Shared so the value parser and the control-signal
+    /// guards cannot disagree about where a line starts, or about which lines are values (#82).
+    /// </summary>
+    private static string NormaliseLine(string rawLine) =>
+        StripPrompt(TerminalMarkers.Replace(rawLine, string.Empty).Trim());
+
+    /// <summary>
+    /// Whether a normalised line opens with a hex pair, which is what makes it a value line. A
+    /// refusal or an acknowledgement always opens with a word.
+    /// </summary>
+    private static bool StartsWithHexPair(string line)
+    {
+        var end = line.IndexOfAny([' ', '\t']);
+
+        return TryParseHexPair(end < 0 ? line : line[..end], out _);
+    }
+
+    /// <summary>Appends one line's value bytes and returns how many it held.</summary>
+    private static int AppendHexDumpLine(List<byte> bytes, string rawLine)
+    {
+        var line = NormaliseLine(rawLine);
+
+        var tokens = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        var take = Math.Min(tokens.Length, HexDumpBytesPerLine);
+        var count = 0;
+
+        for (var i = 0; i < take; i++)
+        {
+            if (!TryParseHexPair(tokens[i], out var value))
+            {
+                // Either this is not a value line at all, or the ASCII column has begun.
+                break;
+            }
+
+            bytes.Add(value);
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Removes a leading <c>[bluetooth]#</c>-style prompt. bluetoothctl interleaves its prompt with
+    /// output, so a value line can arrive with one in front of it.
+    /// </summary>
+    private static string StripPrompt(string line)
+    {
+        if (!line.StartsWith('['))
+        {
+            return line;
+        }
+
+        var end = line.IndexOf("]#", StringComparison.Ordinal);
+
+        return end < 0 ? line : line[(end + 2)..].Trim();
+    }
+
+    private static bool TryParseHexPair(string token, out byte value)
+    {
+        var hex = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? token[2..] : token;
+
+        value = 0;
+
+        return hex.Length == 2
+               && byte.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
+    }
+
+    /// <summary>
+    /// bluetoothctl acknowledges dispatching a GATT operation to bluetoothd before its reply
+    /// arrives; the reply itself is silent on success. These are the only positive signals it gives.
+    /// </summary>
+    private const string ReadAcknowledgement = "Attempting to read";
+
+    private const string WriteAcknowledgement = "Attempting to write";
+
+    /// <summary>
+    /// Everything bluetoothctl 5.66 prints when it refuses a command instead of carrying it out,
+    /// taken from the strings in the binary shipped on the target unit. A refusal must never be read
+    /// as a quiet success or an empty result (#72).
+    /// </summary>
+    /// <remarks>
+    /// Anchored to the start of a line, and only ever matched against a control line — see
+    /// <see cref="ControlLines"/>. bluetoothctl prints a refusal as a whole line of its own, so
+    /// anchoring costs nothing and keeps the match from being satisfied by text that merely contains
+    /// the phrase (#82). "not available" is the one that has to be spelled out in full: on its own it
+    /// is ordinary English, and BlueZ only ever emits it as "&lt;Kind&gt; &lt;name&gt; not available".
+    /// </remarks>
+    private static readonly Regex RefusalLine = new(
+        "^(Invalid command in menu"
+        + "|No device connected"
+        + "|No attribute selected"
+        + @"|Failed to (read|write|disconnect)\b"
+        + @"|(Attribute|Device|Controller) \S+ not available)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Refusals bluetoothctl can give a scan. Kept separate from <see cref="RefusalLine"/> because
+    /// scan output is not framed like a session transcript: it is read a line at a time, and the
+    /// lines carry advertised device names, which are untrusted.
+    /// </summary>
+    private static readonly string[] ScanRefusalMarkers =
+    [
+        "Invalid command in menu",
+        "Failed to start discovery",
+    ];
+
+    /// <summary>
+    /// The lines of a session transcript that are bluetoothctl speaking, with the lines that are the
+    /// device's own value removed.
+    /// </summary>
+    /// <remarks>
+    /// Control signals must never be matched against a value line. bluetoothctl renders a value as a
+    /// hexdump whose second column is the same bytes as printable ASCII, so the Edge Unit's payload
+    /// text — <c>error_message</c> is free text the firmware fills in — is part of the transcript. A
+    /// scan of the whole thing let a status payload containing "not available" be reported as
+    /// bluetoothctl refusing the read, discarding the real error the unit had just reported (#82).
+    ///
+    /// This is #72's own hazard inverted: there, a Main Unit fault was blamed on the Edge Unit; here,
+    /// a genuine Edge Unit error was replaced by a transport exception. Advertised names got this
+    /// treatment at the scan end from the start; values needed it too.
+    ///
+    /// It also keeps the value out of every exception message this class raises, and on the write path
+    /// the value is the provisioning payload — which carries the WiFi password.
+    /// </remarks>
+    private static IEnumerable<string> ControlLines(string output) =>
+        output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(NormaliseLine)
+            .Where(line => line.Length > 0 && !StartsWithHexPair(line));
+
+    private static void EnsureNotRefused(string output, string operation)
+    {
+        var refusal = ControlLines(output).FirstOrDefault(line => RefusalLine.IsMatch(line));
+
+        if (refusal is not null)
+        {
+            throw new BleTransportException($"bluetoothctl refused to {operation}: {Excerpt(refusal)}");
+        }
+    }
+
+    private static void EnsureAcknowledged(string output, string acknowledgement, string operation)
+    {
+        if (!ControlLines(output).Any(line => line.Contains(acknowledgement, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new BleTransportException(
+                $"bluetoothctl never dispatched the {operation}; it did not report \"{acknowledgement}\".");
+        }
+    }
+
+    /// <summary>Guards the streaming scan. See <see cref="ScanRefusalMarkers"/> for the narrow set.</summary>
+    private static void EnsureScanLineNotRefused(string line)
+    {
+        // Advertised names arrive on "Device <address> <name>" lines; refusals never do.
+        if (line.Contains("Device ", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var refusal = ScanRefusalMarkers.FirstOrDefault(
+            marker => line.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+        if (refusal is not null)
+        {
+            throw new BleTransportException($"bluetoothctl refused to scan: {line.Trim()}");
+        }
     }
 
     private Process StartProcess()
@@ -440,7 +778,7 @@ internal sealed class BlueZBleTransport : IBleTransport
         }
     }
 
-    /// <summary>Condenses subprocess stderr into a single bounded line for an exception message.</summary>
+    /// <summary>Condenses subprocess output into a single bounded line for an exception message.</summary>
     internal static string Excerpt(string error)
     {
         var text = string.Join(

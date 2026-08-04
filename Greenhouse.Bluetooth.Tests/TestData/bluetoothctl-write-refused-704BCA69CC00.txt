@@ -1,0 +1,39 @@
+Waiting to connect to bluetoothd...[0;94m[bluetooth][0m#            [0;94m[GH-Edge-704BCA69CC00][0m# menu gatt
+[1;39mMenu gatt:[0m
+[1;39mAvailable commands:[0m
+[1;39m-------------------[0m
+[1;39mlist-attributes [dev/local]                       [0mList attributes
+[1;39mselect-attribute <attribute/UUID>                 [0mSelect attribute
+[1;39mattribute-info [attribute/UUID]                   [0mSelect attribute
+[1;39mread [offset]                                     [0mRead attribute value
+[1;39mwrite <data=xx xx ...> [offset] [type]            [0mWrite attribute value
+[1;39macquire-write                                     [0mAcquire Write file descriptor
+[1;39mrelease-write                                     [0mRelease Write file descriptor
+[1;39macquire-notify                                    [0mAcquire Notify file descriptor
+[1;39mrelease-notify                                    [0mRelease Notify file descriptor
+[1;39mnotify <on/off>                                   [0mNotify attribute value
+[1;39mclone [dev/attribute/UUID]                        [0mClone a device or attribute
+[1;39mregister-application [UUID ...]                   [0mRegister profile to connect
+[1;39munregister-application                            [0mUnregister profile
+[1;39mregister-service <UUID> [handle]                  [0mRegister application service.
+[1;39munregister-service <UUID/object>                  [0mUnregister application service
+[1;39mregister-includes <UUID> [handle]                 [0mRegister as Included service in.
+[1;39munregister-includes <Service-UUID><Inc-UUID>      [0mUnregister Included service.
+[1;39mregister-characteristic <UUID> <Flags=read,write,notify...> [handle] [0mRegister application characteristic
+[1;39munregister-characteristic <UUID/object>           [0mUnregister application characteristic
+[1;39mregister-descriptor <UUID> <Flags=read,write...> [handle] [0mRegister application descriptor
+[1;39munregister-descriptor <UUID/object>               [0mUnregister application descriptor
+[1;39mback                                              [0mReturn to main menu
+[1;39mversion                                           [0mDisplay version
+[1;39mquit                                              [0mQuit program
+[1;39mexit                                              [0mQuit program
+[1;39mhelp                                              [0mDisplay help about this program
+[1;39mexport                                            [0mPrint environment variables
+[0;94m[GH-Edge-704BCA69CC00][0m#                                                        [0;94m[GH-Edge-704BCA69CC00][0m#                                    Agent registered
+[0;94m[GH-Edge-704BCA69CC00][0m#                                    [[0;93mCHG[0m] Controller E4:5F:01:8E:47:93 Pairable: yes
+[0;94m[GH-Edge-704BCA69CC00][0m# select-attribute 00034452-414f-424e-4f2d-454744454847
+<lect-attribute 00034452-414f-424e-4f2d-454744454847                                    [0;94m[GH-Edge-704BCA69CC00:/service000e/char0011][0m#                                  write "0x7b 0x7d"
+Attempting to write /org/bluez/hci0/dev_70_4B_CA_69_CC_02/service000e/char0011
+[0;94m[GH-Edge-704BCA69CC00:/service000e/char0011][0m#                                                                                           Failed to write: org.bluez.Error.NotSupported
+[0;94m[GH-Edge-704BCA69CC00:/service000e/char0011][0m# quit
+[0;94m[GH-Edge-704BCA69CC00:/service000e/char0011][0m#                                                                                           

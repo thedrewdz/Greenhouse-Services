@@ -312,14 +312,14 @@ public class BlueZBleTransportTests
     }
 
     /// <summary>
-    /// The refusal scan runs over the entire transcript, and a value's ASCII column is part of it, so
-    /// a phrase from the refusal list appearing inside the Edge Unit's own <c>error_message</c> is
-    /// read as bluetoothctl refusing the command. The firmware fills that field with
-    /// <c>snprintf</c> from free text (<c>edge/greenhouse-edge/src/codec_json.c</c>), so it is
-    /// device-controlled — exactly the untrusted input <c>ScanRefusalMarkers</c> was deliberately
-    /// narrowed for at the scan end, and not narrowed for here.
+    /// Regression for #82. The refusal scan ran over the entire transcript, and a value's ASCII
+    /// column is part of it, so a phrase from the refusal list appearing inside the Edge Unit's own
+    /// <c>error_message</c> was read as bluetoothctl refusing the command. The firmware fills that
+    /// field with <c>snprintf</c> from free text (<c>edge/greenhouse-edge/src/codec_json.c</c>), so it
+    /// is device-controlled — exactly the untrusted input <c>ScanRefusalMarkers</c> was deliberately
+    /// narrowed for at the scan end, and was not narrowed for here.
     /// </summary>
-    [Fact(Skip = "Fails: reproduces open defect #82. Remove this Skip as part of fixing it.")]
+    [Fact]
     public async Task Read_is_not_refused_by_a_payload_whose_text_contains_a_refusal_phrase()
     {
         const string payload =
@@ -334,6 +334,101 @@ public class BlueZBleTransportTests
         var bytes = await ReadAsync(GattTranscript(ReadAcknowledgement + "\n" + dump));
 
         Assert.Equal(payload, Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
+    /// Regression for #82 on the write path, which #69's rule requires be covered too. A write makes
+    /// bluetoothctl notify the new value, so the transcript carries a hexdump of the **provisioning
+    /// payload** — and that is attacker-adjacent in a way the status payload is not: the SSID and
+    /// password are operator-supplied free text, so a network named "not available" was enough to
+    /// report a completed write as a refusal.
+    /// </summary>
+    [Fact]
+    public async Task Write_is_not_refused_by_a_payload_whose_text_contains_a_refusal_phrase()
+    {
+        var payload = PayloadWithPhraseInOneLine("{\"wifi_ssid\":\"", "not available", "\"}");
+        var dump = HexDump(payload);
+
+        Assert.Contains("not available", dump, StringComparison.Ordinal);
+
+        await WriteAsync(GattTranscript(WriteAcknowledgement + "\n" + dump));
+    }
+
+    /// <summary>
+    /// A value can never reach an exception message. On the write path the value is the provisioning
+    /// payload, so a transcript line quoted into a message is a route for the WiFi password to reach
+    /// a log or an operator's screen.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_message_never_quotes_the_value()
+    {
+        const string secret = "sup3r-s3cret-psk";
+        var transcript =
+            "Failed to write: org.bluez.Error.Failed\n" + HexDump($"{{\"wifi_password\":\"{secret}\"}}");
+
+        var ex = await Assert.ThrowsAsync<BleTransportException>(
+            () => WriteAsync(GattTranscript(transcript)));
+
+        Assert.Contains("Failed to write", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("wifi_password", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A genuine refusal is still caught after #82's narrowing — the point of the fix is to stop
+    /// matching device data, not to stop matching bluetoothctl.
+    /// </summary>
+    [Theory]
+    [InlineData("Invalid command in menu main: read")]
+    [InlineData("No device connected")]
+    [InlineData("No attribute selected")]
+    [InlineData("Failed to read: org.bluez.Error.NotPermitted")]
+    [InlineData("Attribute 00034452-414f-424e-4f2d-454744454847 not available")]
+    public async Task Read_still_fails_on_a_genuine_refusal(string refusal)
+    {
+        var ex = await Assert.ThrowsAsync<BleTransportException>(
+            () => ReadAsync(GattTranscript(refusal)));
+
+        Assert.Contains("refused", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The write path keeps the same detection. Same list, per #69.</summary>
+    [Theory]
+    [InlineData("Invalid command in menu main: write")]
+    [InlineData("No device connected")]
+    [InlineData("No attribute selected")]
+    [InlineData("Failed to write: org.bluez.Error.Failed")]
+    [InlineData("Attribute 00024452-414f-424e-4f2d-454744454847 not available")]
+    public async Task Write_still_fails_on_a_genuine_refusal(string refusal)
+    {
+        var ex = await Assert.ThrowsAsync<BleTransportException>(
+            () => WriteAsync(GattTranscript(refusal)));
+
+        Assert.Contains("refused", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A refusal bluetoothctl printed behind its own prompt is still a refusal — the guards normalise
+    /// a line before matching, exactly as the value parser does.
+    /// </summary>
+    [Fact]
+    public async Task Read_still_fails_on_a_refusal_printed_behind_a_prompt()
+    {
+        await Assert.ThrowsAsync<BleTransportException>(
+            () => ReadAsync(GattTranscript("[GH-Edge-704BCA69CC00]# No attribute selected")));
+    }
+
+    /// <summary>
+    /// The acknowledgement is a control signal too, so a payload that quotes it must not stand in for
+    /// bluetoothctl having actually dispatched the read.
+    /// </summary>
+    [Fact]
+    public async Task Read_fails_when_only_the_payload_claims_the_read_was_dispatched()
+    {
+        var ex = await Assert.ThrowsAsync<BleTransportException>(
+            () => ReadAsync(GattTranscript(HexDump("Attempting to read is a lie"))));
+
+        Assert.Contains("never dispatched", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -565,6 +660,30 @@ public class BlueZBleTransportTests
     /// captures rather than invented. What it does not prove is that bluetoothctl renders this
     /// particular payload exactly so — only that the parser and the guards handle that rendering.
     /// </remarks>
+    /// <summary>
+    /// Builds a payload in which <paramref name="phrase"/> is guaranteed to land inside a single
+    /// hexdump line's ASCII column, padding the value until it aligns.
+    /// </summary>
+    /// <remarks>
+    /// The hexdump wraps every sixteen bytes, so whether a phrase is contiguous in the ASCII column
+    /// is an accident of where the surrounding JSON puts it. Hand-aligning it means the test goes
+    /// vacuous the moment that JSON changes by a character — which is what happened writing this one.
+    /// </remarks>
+    private static string PayloadWithPhraseInOneLine(string prefix, string phrase, string suffix)
+    {
+        for (var padding = 0; padding < 16; padding++)
+        {
+            var payload = prefix + new string('x', padding) + phrase + suffix;
+
+            if (HexDump(payload).Contains(phrase, StringComparison.Ordinal))
+            {
+                return payload;
+            }
+        }
+
+        throw new InvalidOperationException($"No padding put '{phrase}' inside one hexdump line.");
+    }
+
     private static string HexDump(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);

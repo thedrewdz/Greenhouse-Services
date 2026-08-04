@@ -10,10 +10,11 @@ Durable policy, canonical context, architecture, MQTT contracts, ADRs, and skill
 
 - Repository purpose: Greenhouse Main Unit services (headless C#/.NET brain).
 - Branch: `feature/72-ble-gatt-menu-sequence`.
-- Bugs #72 (BLE GATT commands issued in `bluetoothctl`'s main menu) and #80 (a read's value is
-  printed twice) fixed. Solution builds clean; **277 tests pass**. #72's AC #4 is verified on-device:
-  a real provisioning round trip reached the firmware, which returned success, and the unit is now
-  registered and heartbeating.
+- Bugs #72 (BLE GATT commands issued in `bluetoothctl`'s main menu), #80 (a read's value is printed
+  twice) and #82 (the refusal guard matched the device's own payload text) fixed. Solution builds
+  clean; **294 tests pass**. #72's AC #4 is verified on-device: a real provisioning round trip reached
+  the firmware, which returned success, and the unit is registered and heartbeating. The round trip was
+  re-run after the #82 fix.
 - Epic #25 (Edge Unit Onboarding and Configuration — Services) was implemented and merged earlier
   across all seven sub-issues (#30–#36).
 
@@ -213,6 +214,32 @@ same PR; both real transcripts are committed under `Greenhouse.Bluetooth.Tests/T
 **Keep real captured transcripts as fixtures.** Hand-written ones are what let #72 *and* #80 through
 — they have a single dump, no notification, and no terminal noise, because that is what a person
 writes. `TestData/` exists to hold more.
+
+### #82 — the refusal guard matched the Edge Unit's own payload text
+
+Raised by the test pass on this branch, and a regression introduced by the #72 fix itself.
+`EnsureNotRefused` scanned the whole transcript, and a value's ASCII column is part of it — so a
+status payload whose `error_message` contained `"not available"` was reported as bluetoothctl refusing
+the read. A real Edge Unit error (2010) was discarded and replaced with a transport exception.
+
+**This is #72's own hazard inverted.** #72 blamed the Edge Unit for a Main Unit fault; #82 blamed
+bluetoothctl for an Edge Unit report. The scan end had been narrowed for untrusted advertised names
+from the start; the value path had not been given the same treatment, and a value read off the device
+is exactly as untrusted.
+
+Control signals now match only against **control lines** — the transcript with value lines removed —
+and refusal phrases are anchored to the start of a line. `"not available"` on its own is ordinary
+English, so it is spelled out as BlueZ actually emits it (`<Kind> <name> not available`).
+
+Two things fell out of it worth keeping:
+
+- **A value can no longer reach an exception message.** On the write path the value is the provisioning
+  payload, so quoting a transcript line was a route for the WiFi password to reach a log. There is a
+  test asserting a refusal message contains neither the password nor its field name.
+- **Alignment-dependent tests go vacuous silently.** The hexdump wraps every sixteen bytes, so whether
+  a phrase is contiguous in the ASCII column is an accident of the surrounding JSON. The first version
+  of the write-path test passed for the wrong reason. `PayloadWithPhraseInOneLine` computes the padding
+  instead of hand-aligning it.
 
 ### Blocker found upstream of onboarding: the daemon cannot store WiFi credentials
 

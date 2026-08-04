@@ -521,10 +521,29 @@ internal sealed class BlueZBleTransport : IBleTransport
             ? block[..(block.Length / 2)]
             : block;
 
+    /// <summary>
+    /// Strips a transcript line down to its content: terminal escapes gone, and any prompt
+    /// bluetoothctl printed in front of it gone. Shared so the value parser and the control-signal
+    /// guards cannot disagree about where a line starts, or about which lines are values (#82).
+    /// </summary>
+    private static string NormaliseLine(string rawLine) =>
+        StripPrompt(TerminalMarkers.Replace(rawLine, string.Empty).Trim());
+
+    /// <summary>
+    /// Whether a normalised line opens with a hex pair, which is what makes it a value line. A
+    /// refusal or an acknowledgement always opens with a word.
+    /// </summary>
+    private static bool StartsWithHexPair(string line)
+    {
+        var end = line.IndexOfAny([' ', '\t']);
+
+        return TryParseHexPair(end < 0 ? line : line[..end], out _);
+    }
+
     /// <summary>Appends one line's value bytes and returns how many it held.</summary>
     private static int AppendHexDumpLine(List<byte> bytes, string rawLine)
     {
-        var line = StripPrompt(TerminalMarkers.Replace(rawLine, string.Empty).Trim());
+        var line = NormaliseLine(rawLine);
 
         var tokens = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
         var take = Math.Min(tokens.Length, HexDumpBytesPerLine);
@@ -584,21 +603,25 @@ internal sealed class BlueZBleTransport : IBleTransport
     /// taken from the strings in the binary shipped on the target unit. A refusal must never be read
     /// as a quiet success or an empty result (#72).
     /// </summary>
-    private static readonly string[] RefusalMarkers =
-    [
-        "Invalid command in menu",  // the command does not exist in the menu it was issued in
-        "No device connected",      // select-attribute before the attribute tree resolved
-        "No attribute selected",    // read or write with nothing selected
-        "not available",            // "Attribute <uuid> not available", and its Device/Controller kin
-        "Failed to read",
-        "Failed to write",
-        "Failed to disconnect",
-    ];
+    /// <remarks>
+    /// Anchored to the start of a line, and only ever matched against a control line — see
+    /// <see cref="ControlLines"/>. bluetoothctl prints a refusal as a whole line of its own, so
+    /// anchoring costs nothing and keeps the match from being satisfied by text that merely contains
+    /// the phrase (#82). "not available" is the one that has to be spelled out in full: on its own it
+    /// is ordinary English, and BlueZ only ever emits it as "&lt;Kind&gt; &lt;name&gt; not available".
+    /// </remarks>
+    private static readonly Regex RefusalLine = new(
+        "^(Invalid command in menu"
+        + "|No device connected"
+        + "|No attribute selected"
+        + @"|Failed to (read|write|disconnect)\b"
+        + @"|(Attribute|Device|Controller) \S+ not available)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// Refusals bluetoothctl can give a scan. Kept separate from <see cref="RefusalMarkers"/>
-    /// because scan output carries advertised device names, which are untrusted: a neighbouring
-    /// device could otherwise name itself into aborting the scan.
+    /// Refusals bluetoothctl can give a scan. Kept separate from <see cref="RefusalLine"/> because
+    /// scan output is not framed like a session transcript: it is read a line at a time, and the
+    /// lines carry advertised device names, which are untrusted.
     /// </summary>
     private static readonly string[] ScanRefusalMarkers =
     [
@@ -606,21 +629,43 @@ internal sealed class BlueZBleTransport : IBleTransport
         "Failed to start discovery",
     ];
 
+    /// <summary>
+    /// The lines of a session transcript that are bluetoothctl speaking, with the lines that are the
+    /// device's own value removed.
+    /// </summary>
+    /// <remarks>
+    /// Control signals must never be matched against a value line. bluetoothctl renders a value as a
+    /// hexdump whose second column is the same bytes as printable ASCII, so the Edge Unit's payload
+    /// text — <c>error_message</c> is free text the firmware fills in — is part of the transcript. A
+    /// scan of the whole thing let a status payload containing "not available" be reported as
+    /// bluetoothctl refusing the read, discarding the real error the unit had just reported (#82).
+    ///
+    /// This is #72's own hazard inverted: there, a Main Unit fault was blamed on the Edge Unit; here,
+    /// a genuine Edge Unit error was replaced by a transport exception. Advertised names got this
+    /// treatment at the scan end from the start; values needed it too.
+    ///
+    /// It also keeps the value out of every exception message this class raises, and on the write path
+    /// the value is the provisioning payload — which carries the WiFi password.
+    /// </remarks>
+    private static IEnumerable<string> ControlLines(string output) =>
+        output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(NormaliseLine)
+            .Where(line => line.Length > 0 && !StartsWithHexPair(line));
+
     private static void EnsureNotRefused(string output, string operation)
     {
-        var refusal = RefusalMarkers.FirstOrDefault(
-            marker => output.Contains(marker, StringComparison.OrdinalIgnoreCase));
+        var refusal = ControlLines(output).FirstOrDefault(line => RefusalLine.IsMatch(line));
 
         if (refusal is not null)
         {
-            throw new BleTransportException(
-                $"bluetoothctl refused to {operation}: {Excerpt(LinesContaining(output, refusal))}");
+            throw new BleTransportException($"bluetoothctl refused to {operation}: {Excerpt(refusal)}");
         }
     }
 
     private static void EnsureAcknowledged(string output, string acknowledgement, string operation)
     {
-        if (!output.Contains(acknowledgement, StringComparison.OrdinalIgnoreCase))
+        if (!ControlLines(output).Any(line => line.Contains(acknowledgement, StringComparison.OrdinalIgnoreCase)))
         {
             throw new BleTransportException(
                 $"bluetoothctl never dispatched the {operation}; it did not report \"{acknowledgement}\".");
@@ -644,13 +689,6 @@ internal sealed class BlueZBleTransport : IBleTransport
             throw new BleTransportException($"bluetoothctl refused to scan: {line.Trim()}");
         }
     }
-
-    private static string LinesContaining(string output, string marker) =>
-        string.Join(
-            '\n',
-            output
-                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-                .Where(line => line.Contains(marker, StringComparison.OrdinalIgnoreCase)));
 
     private Process StartProcess()
     {

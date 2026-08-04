@@ -9,9 +9,11 @@ Durable policy, canonical context, architecture, MQTT contracts, ADRs, and skill
 ## Current Workspace State
 
 - Repository purpose: Greenhouse Main Unit services (headless C#/.NET brain).
-- Branch: `feature/25-edge-unit-onboarding-and-configuration`.
-- Epic #25 (Edge Unit Onboarding and Configuration — Services) implemented across all seven
-  sub-issues (#30–#36). Solution builds clean; 235 tests pass.
+- Branch: `feature/72-ble-gatt-menu-sequence`.
+- Bug #72 (BLE GATT commands issued in `bluetoothctl`'s main menu) fixed. Solution builds clean;
+  **273 tests pass** (was 254 + the on-device QA additions).
+- Epic #25 (Edge Unit Onboarding and Configuration — Services) was implemented and merged earlier
+  across all seven sub-issues (#30–#36).
 
 ## Current Progress Snapshot
 
@@ -153,8 +155,50 @@ Re-verified after these fixes: `dotnet build` clean, 254 tests pass, and the dae
 no UI present, migrates on first run, serves `GET /api/onboarding` and `GET /api/edge-units` with the
 documented shapes, and publishes all seven new paths in OpenAPI.
 
+## Bug #72 — BLE GATT commands were issued in the wrong `bluetoothctl` menu
+
+`select-attribute`, `read`, and `write` live in `bluetoothctl`'s `gatt` submenu. The transport never
+issued `menu gatt`, so on a real device every one of them was refused and BLE provisioning could not
+succeed anywhere. The write was the dangerous half: success was inferred from the *absence* of
+"Failed to write", and the real refusal reads "Invalid command in menu main: write", so a write that
+sent no bytes reported success.
+
+- Both GATT operations now share one `RunGattSessionAsync`, which enters the submenu first. The
+  literal sequence lives in `DriveGattSessionAsync`, extracted so a test can assert it — a
+  `bluetoothctl` stand-in cannot, because it answers whatever it is asked. That is exactly why a
+  green suite missed this.
+- Outcomes are detected positively (`Attempting to read` / `Attempting to write`) and fail closed on
+  refusal. **The accepted and refused strings were taken from `strings` on the `bluetoothctl` 5.66
+  binary on the test Pi, not assumed.**
+- `ParseReadValue` now reads only the leading hex column of each hexdump line. This was forced by the
+  fix: `menu gatt` prints the whole submenu help listing into the transcript the value is parsed
+  from. It also closes a latent defect — the hexdump's ASCII column repeats the payload verbatim, so
+  a value containing `" ad "` had a bare hex pair scanned out of it as an extra byte.
+- Hazard-class sweep (same class = a refusal read as a benign empty result): `ScanAsync` now aborts
+  on a refused `scan on` instead of reporting a greenhouse with no Edge Units, and `DisconnectAsync`
+  surfaces a refusal to its caller's warning log. `ConnectAsync` already detected its outcome
+  positively ("Connection successful") and was left alone.
+
+On-device evidence captured on the test Pi (`192.168.4.94`, BlueZ 5.66) — the exact sequence the code
+now sends, minus the firmware:
+
+```
+BEFORE (main menu, as shipped):  Invalid command in menu main: select-attribute
+                                 Invalid command in menu main: read
+AFTER  (menu gatt first, fixed): No device connected / No attribute selected
+```
+
+The commands are now accepted and reach the GATT layer, failing only for want of a connected unit.
+
+**AC #4 is NOT satisfied.** The full provisioning round trip needs `GH-Edge-704BCA69CC00`
+(`70:4B:CA:69:CC:02`) powered and advertising; it did not appear in a 30-second scan and is not in
+bluetoothd's cache, while the adapter found six other BLE devices. That is physical access, so it is
+QA's pass to complete.
+
 ## Next Actions
 
+- **#72 AC #4** — provisioning round trip against a powered `GH-Edge-704BCA69CC00`. Everything else
+  on #72 is verified.
 - On-device verification on the test Pi: BLE scan/provision against a real Edge Unit, and the
   `ghcfg/wr-` → `ghcfg/ack-` round trip against Mosquitto. Neither path can be exercised on a
   development host; unit coverage substitutes fakes at the transport seam. The #47 scan-window fix

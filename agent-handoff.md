@@ -10,8 +10,10 @@ Durable policy, canonical context, architecture, MQTT contracts, ADRs, and skill
 
 - Repository purpose: Greenhouse Main Unit services (headless C#/.NET brain).
 - Branch: `feature/72-ble-gatt-menu-sequence`.
-- Bug #72 (BLE GATT commands issued in `bluetoothctl`'s main menu) fixed. Solution builds clean;
-  **273 tests pass** (was 254 + the on-device QA additions).
+- Bugs #72 (BLE GATT commands issued in `bluetoothctl`'s main menu) and #80 (a read's value is
+  printed twice) fixed. Solution builds clean; **277 tests pass**. #72's AC #4 is verified on-device:
+  a real provisioning round trip reached the firmware, which returned success, and the unit is now
+  registered and heartbeating.
 - Epic #25 (Edge Unit Onboarding and Configuration — Services) was implemented and merged earlier
   across all seven sub-issues (#30–#36).
 
@@ -190,15 +192,51 @@ AFTER  (menu gatt first, fixed): No device connected / No attribute selected
 
 The commands are now accepted and reach the GATT layer, failing only for want of a connected unit.
 
-**AC #4 is NOT satisfied.** The full provisioning round trip needs `GH-Edge-704BCA69CC00`
-(`70:4B:CA:69:CC:02`) powered and advertising; it did not appear in a 30-second scan and is not in
-bluetoothd's cache, while the adapter found six other BLE devices. That is physical access, so it is
-QA's pass to complete.
+### AC #4 — satisfied, and it found a second defect (#80)
+
+With the ESP32 powered, the full round trip was run against `GH-Edge-704BCA69CC00`
+(`70:4B:CA:69:CC:02`) using the exact sequence the fixed code emits:
+
+- `connect` → `Connection successful`.
+- **Write** of the real 143-byte provisioning payload → `Attempting to write .../char000f`, no
+  refusal. 143 bytes is far past the 20-byte ATT default, so the long-write path is covered too.
+- **Status read** → `{"result":"success","error_code":0,"error_message":""}`.
+- The unit then joined WiFi, reached Mosquitto, and **registered itself**:
+  `GET /api/edge-units` returns it at `pending-mapping` with `lastHeartbeatAt` populated.
+
+**#80 was found doing this, and the #72 menu fix alone does not get provisioning working.** A read
+makes `bluetoothctl` print the value *twice* — once as the `[CHG] Attribute ... Value:` notification
+the read itself triggers, once as the read's own reply. `ParseReadValue` returned the payload
+doubled, which `ParseStatus` cannot deserialise, so provisioning still ended at 2099. Fixed in the
+same PR; both real transcripts are committed under `Greenhouse.Bluetooth.Tests/TestData/`.
+
+**Keep real captured transcripts as fixtures.** Hand-written ones are what let #72 *and* #80 through
+— they have a single dump, no notification, and no terminal noise, because that is what a person
+writes. `TestData/` exists to hold more.
+
+### Blocker found upstream of onboarding: the daemon cannot store WiFi credentials
+
+`POST /api/setup/wifi-config` fails with `{"connected":false,"errorMessage":"Error: Insufficient
+privileges."}`. The daemon runs as `admin` under systemd with no active login session, so polkit
+refuses the `nmcli` connect. Credentials are persisted *only* on a successful connect, so nothing is
+ever stored, and `ProvisionUnitAsync` fails at **2003 "No WiFi credentials are stored on the Main
+Unit"** before any BLE work happens.
+
+That is why AC #4 had to be driven through `bluetoothctl` directly rather than through the API. Filed
+separately. Until it is fixed, onboarding cannot complete through the daemon on the real unit.
+
+### Test Pi deployment state
+
+`/opt/greenhouse-services/Greenhouse.Bluetooth.dll` is the **Release build of this branch**, not
+`main`. The pre-existing assembly is at `/tmp/Greenhouse.Bluetooth.dll.bak-72`
+(md5 `af2e96d1…`) if it needs restoring. Redeploy from `main` after the PR merges.
 
 ## Next Actions
 
-- **#72 AC #4** — provisioning round trip against a powered `GH-Edge-704BCA69CC00`. Everything else
-  on #72 is verified.
+- **The WiFi-credentials privilege blocker above** — onboarding cannot complete through the daemon
+  until it is fixed. Highest priority of anything here: it gates the whole onboarding journey.
+- **Map the provisioned unit.** `704BCA69CC00` is registered and sitting at `pending-mapping`; the
+  `PUT /api/edge-units/{device_id}` mapping path has still never been exercised on a real unit.
 - On-device verification on the test Pi: BLE scan/provision against a real Edge Unit, and the
   `ghcfg/wr-` → `ghcfg/ack-` round trip against Mosquitto. Neither path can be exercised on a
   development host; unit coverage substitutes fakes at the transport seam. The #47 scan-window fix

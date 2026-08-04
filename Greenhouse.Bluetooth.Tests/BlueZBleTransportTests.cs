@@ -111,6 +111,24 @@ public class BlueZBleTransportTests
     }
 
     /// <summary>
+    /// The success path, from the transcript captured after a real 143-byte provisioning payload was
+    /// written to `GH-Edge-704BCA69CC00` and the firmware accepted it. This is the value
+    /// <see cref="BleEdgeUnitProvisioningAdapter"/> has to map to a successful provisioning, so it is
+    /// the one that most needs to survive the #80 double-print intact.
+    /// </summary>
+    [Fact]
+    public void ParseReadValue_reads_the_success_payload_from_a_real_device_transcript()
+    {
+        var transcript = File.ReadAllText(TestDataPath("bluetoothctl-read-success-704BCA69CC00.txt"));
+
+        var bytes = BlueZBleTransport.ParseReadValue(transcript);
+
+        Assert.Equal(
+            "{\"result\":\"success\",\"error_code\":0,\"error_message\":\"\"}",
+            Encoding.UTF8.GetString(bytes));
+    }
+
+    /// <summary>
     /// The #80 double-print with a payload whose length is an exact multiple of sixteen, so no short
     /// line closes the first dump and the two runs merge into one apparent block.
     /// </summary>

@@ -93,10 +93,11 @@ Before finalizing changes, verify:
 
    These are **run by CI, not only by convention**: `.github/workflows/build-and-test.yml` runs
    them on every pull request targeting `main`, and its check is what this repository contributes
-   to the harness's Merge Approval condition. Note that `main` has no branch protection yet, so a
-   red check does not itself block a merge — until it is marked required, treat a red check as
-   blocking by policy rather than by mechanism. Running the commands locally first is still
-   expected — CI is the gate, not the feedback loop.
+   to the harness's Merge Approval condition. Since 2026-08-05 `build-and-test` is a **required**
+   status check on `main` with admin bypass off, so a red check blocks the merge by mechanism, not
+   merely by policy. `main` is pull-request-only in this repository — direct pushes are rejected,
+   including docs-only ones. Running the commands locally first is still expected — CI is the gate,
+   not the feedback loop.
 4. Confirm tests for changed behavior exist and pass.
 5. Update `agent-handoff.md` with factual current-session state.
 6. Propose durable guidance changes in the documentation repository, not here.
